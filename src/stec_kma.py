@@ -84,6 +84,12 @@ def main(
     logging.info('Locating samples in the sequence path, %s', sequence_path)
     sample_dict = _find_samples(sequence_path=sequence_path)
 
+    logging.info('Baiting reads with BBMap')
+    sample_dict = _bait_reads_bbmap(
+        db_fasta=db_fasta,
+        sample_dict=sample_dict
+    )
+
     logging.info('Running KMA with the combined allele database')
     sample_dict = _run_combined_db_kma(
         database_path=database_path,
@@ -179,6 +185,52 @@ def _find_samples(
     return sample_dict
 
 
+def _bait_reads_bbmap(
+    *,  # Enforce keyword arguments
+    db_fasta: str,
+    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
+) -> Dict[str, Dict[str, Union[List[str], str]]]:
+    """
+    Use BBMap to bait reads with the combined allele database
+    """
+    for sample, sequence_dict in sample_dict.items():
+
+        # Output path for the sample
+        baited_reads = []
+        for direction in ['R1', 'R2']:
+            baited_reads.append(
+                os.path.join(
+                    sequence_dict["output_path"],
+                    f'{sample}_{direction}_baited.fastq.gz'
+                )
+            )
+        sequence_dict['baited_reads'] = baited_reads
+
+        # Create the system call
+        bbduk_call = (
+            f'bbduk.sh in={sequence_dict['files'][0]} '
+            f'in2={sequence_dict['files'][1]} '
+            f'outm={baited_reads[0]} '
+            f'outm2={baited_reads[1]} '
+            f'ref={db_fasta} '
+            '--fixjunk'
+        )
+
+        logging.info('System call: %s', bbduk_call)
+
+        # Run the command if the outputs do not already exist
+        if (
+            not os.path.exists(baited_reads[0])
+            and not os.path.exists(baited_reads[1])
+        ):
+            output = run_command(
+                command=bbduk_call, split=False
+            )
+            logging.debug('BBMap output: %s', output.stdout)
+
+    return sample_dict
+
+
 def _run_combined_db_kma(
     database_path: str,
     sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
@@ -207,9 +259,9 @@ def _run_combined_db_kma(
             f'-o {output_path} '
             f'-t_db {database_path} '
             f'-t {threads} '    # Threading
-            f'-ID 50 '  # Identity threshold
             '-mem_mode '        # Memory mode
-            '-a '               # Output all matches
+            '-sasm '            # Skip alignment
+            '-ck'               # Count k-mers over pseudo alignment
         )
 
         logging.info('System call: %s', combined_kma_call)
@@ -637,57 +689,59 @@ def _parse_allele_reports(
         dict: The updated sample dictionary
     """
     for _, sequence_dict in sample_dict.items():
+        print(_)
         # Create a dictionaries to store the best hits, best scores, and
         # best hit files
         best_hits = {}
         best_scores = {}
         best_hit_files = {}
-        
+
         # Iterate through the report files
         for report_file in sequence_dict['kma_report_files']:
-            
+
             # Extract the gene name from the report file
             gene_name = _find_gene_name(allele=report_file)
 
             # Initialise the dictionaries for the gene
             if gene_name not in best_hits:
                 best_hits[gene_name] = {}
-                best_scores[gene_name] = ''
-                best_hit_files[gene_name] = 0
-            
+            if gene_name not in best_scores:
+                best_scores[gene_name] = 0
+            if gene_name not in best_hit_files:
+                best_hit_files[gene_name] = ''
+
             # Read the report file
             with open(report_file, 'r', encoding='utf-8') as report_fh:
                 for line in report_fh:
-                    print('line:', line)
+
                     # Skip the header
                     if line.startswith('#'):
                         continue
-                    
+
                     try:
                         # Extract the reference allele and percentage identity
                         # Template	Score	Expected	Template_length
                         # Template_Identity	Template_Coverage	Query_Identity
                         # Query_Coverage	Depth	q_value	p_value
-                        print(line.rstrip())
-                        quit()
                         reference, _, _, _, t_identity, \
-                            _, _, _, _, _, = line.strip().split('\t')
-                        print(gene_name, reference, t_identity)
-                        quit()
+                            _, _, _, _, _, _ = line.strip().split('\t')
+
                         # Update the best hit if the score is higher
-                        if int(t_identity) > int(best_scores[gene_name]):
+                        if float(t_identity) > float(best_scores[gene_name]):
                             best_hits[gene_name] = reference
-                            best_scores[gene_name] = t_identity
+                            best_scores[gene_name] = float(t_identity)
                             best_hit_files[gene_name] = report_file
                     except ValueError:
                         pass
-            
+
         # Update the sample dictionary
         sequence_dict['best_hits'] = best_hits
         sequence_dict['best_scores'] = best_scores
         sequence_dict['best_hit_files'] = best_hit_files
+
+        print('best_hits:', sequence_dict['best_hits'])
+        print('best_scores:', sequence_dict['best_scores'])
         
-        print(_, 'best_hits:', sequence_dict['best_hits'])
     quit()
     return sample_dict
 
