@@ -9,9 +9,9 @@ any alleles with insertions
 
 # Standard imports
 from argparse import ArgumentParser
+from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from glob import glob
-import gzip
 import logging
 import os
 import re
@@ -26,6 +26,7 @@ from typing import (
 # Third-party imports
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
+import pysam
 
 # Local imports
 from src.version import __version__
@@ -90,41 +91,44 @@ def main(
         sample_dict=sample_dict
     )
 
-    logging.info('Running KMA with the combined allele database')
-    sample_dict = _run_combined_db_kma(
-        database_path=database_path,
+    logging.info('Baiting targets with BBMap')
+    sample_dict = _reverse_bait_targets_bbmap(
+        db_fasta=db_fasta,
+        identity=identity,
+        sample_dict=sample_dict
+    )
+
+    logging.info(
+        'Splitting baited target database into individual alleles for '
+        'KMA analyses'
+    )
+    sample_dict = _extract_sequences(
+        sample_dict=sample_dict
+        )
+    sample_dict = _write_allele_sequences(sample_dict=sample_dict)
+
+    logging.info('Indexing the allele sequences with KMA')
+    sample_dict = _index_allele_sequences(
         sample_dict=sample_dict,
         threads=threads
     )
 
-    logging.info('Extracting mapped reads')
-    sample_dict = _read_frag_files(sample_dict=sample_dict)
-    sample_dict = _ensure_forward_reverse(sample_dict=sample_dict)
-    sample_dict = extract_reads_bbmap(sample_dict=sample_dict)
-
-    logging.info(
-        'Splitting reference database into individual alleles for KMA analyses'
-    )
-    sample_dict = _extract_sequences(
-        db_fasta=db_fasta,
-        sample_dict=sample_dict
-        )
-    sample_dict = _write_allele_sequences(sample_dict=sample_dict)
-    sample_dict = _index_allele_sequences(sample_dict=sample_dict)
-
-    logging.info('Mapping reads to the reference alleles with KMA')    
+    logging.info('Mapping reads to the reference alleles with KMA')
     sample_dict = _map_allele_sequences_kma(
         identity=identity,
         sample_dict=sample_dict,
         threads=threads
     )
     sample_dict = _parse_allele_reports(sample_dict=sample_dict)
-    quit()
+
     logging.info('Mapping reads to the reference alleles with BWA')
-    # sample_dict = map_reads_bwa(
-    #     sample_dict=sample_dict,
-    #     threads=threads
-    # )
+    sample_dict = _map_reads_bwa(
+        sample_dict=sample_dict,
+        threads=threads
+    )
+
+    logging.info('Extracting consensus sequences from the BWA output')
+    sample_dict = _consensus_sequence(sample_dict=sample_dict)
 
 
 def _find_samples(
@@ -196,22 +200,19 @@ def _bait_reads_bbmap(
     for sample, sequence_dict in sample_dict.items():
 
         # Output path for the sample
-        baited_reads = []
-        for direction in ['R1', 'R2']:
-            baited_reads.append(
-                os.path.join(
-                    sequence_dict["output_path"],
-                    f'{sample}_{direction}_baited.fastq.gz'
-                )
-            )
+        baited_reads = os.path.join(
+            sequence_dict["output_path"],
+            f'{sample}_baited.fastq.gz'
+        )
+
+        # Update the sample dictionary
         sequence_dict['baited_reads'] = baited_reads
 
         # Create the system call
         bbduk_call = (
             f'bbduk.sh in={sequence_dict['files'][0]} '
             f'in2={sequence_dict['files'][1]} '
-            f'outm={baited_reads[0]} '
-            f'outm2={baited_reads[1]} '
+            f'outm={baited_reads} '
             f'ref={db_fasta} '
             '--fixjunk'
         )
@@ -219,10 +220,7 @@ def _bait_reads_bbmap(
         logging.info('System call: %s', bbduk_call)
 
         # Run the command if the outputs do not already exist
-        if (
-            not os.path.exists(baited_reads[0])
-            and not os.path.exists(baited_reads[1])
-        ):
+        if not os.path.exists(baited_reads):
             output = run_command(
                 command=bbduk_call, split=False
             )
@@ -231,233 +229,68 @@ def _bait_reads_bbmap(
     return sample_dict
 
 
-def _run_combined_db_kma(
-    database_path: str,
-    sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
-    threads: int,
+def _reverse_bait_targets_bbmap(
+    *,  # Enforce keyword arguments
+    db_fasta: str,
+    identity: int,
+    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
 ) -> Dict[str, Dict[str, Union[List[str], str]]]:
     """
-    Run KMA with the combined allele database
+    Use BBMap to bait targets from the combined allele database with the
+    previously baited reads
 
     Args:
-        database_path: Path of the folder containing the database
+        db_fasta: Path to the gene-specific FASTA file
+        identity: Minimum identity percentage
         sample_dict: Dictionary containing the sample information
-        threads: Number of threads to use
 
     Returns:
         dict: The updated sample dictionary
     """
     for sample, sequence_dict in sample_dict.items():
 
-        # Output path for the sample
-        output_path = os.path.join(sequence_dict["output_path"], sample)
-        sequence_dict['kma_outputs'] = output_path
-
-        # Create the system call
-        combined_kma_call = (
-            f'kma -ipe {" ".join(sequence_dict["files"])} '
-            f'-o {output_path} '
-            f'-t_db {database_path} '
-            f'-t {threads} '    # Threading
-            '-mem_mode '        # Memory mode
-            '-sasm '            # Skip alignment
-            '-ck'               # Count k-mers over pseudo alignment
+        # Output path for the baited targets
+        baited_targets = os.path.join(
+            sequence_dict['output_path'],
+            f'{sample}_baited_targets.fasta'
         )
-
-        logging.info('System call: %s', combined_kma_call)
-
-        # Run the command if the outputs do not already exist
-        if not os.path.exists(output_path + '.res'):
-            output = run_command(command=combined_kma_call)
-            logging.debug('KMA output: %s', output.stdout)
-
-    return sample_dict
-
-
-def _read_frag_files(
-    *,  # Enforce keyword arguments
-    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
-) -> Dict[str, Dict[str, Union[List[str], str]]]:
-    """
-    Extract the mapped read names from the KMA .frag.gz files
-    """
-    # Iterate through the samples
-    for _, sequence_dict in sample_dict.items():
-        # Initialize sets to store the read names and allele hits
-        read_names = set()
-        alleles = set()
-
-        # Create the path to the .frag.gz file
-        frag_file = sequence_dict['kma_outputs'] + '.frag.gz'
-
-        # Read in the .frag.gz file
-        with gzip.open(frag_file, 'rt') as frag_fh:
-            for line in frag_fh:
-                # Extract the read name and add it to the list
-                read_name = line.strip().split('\t')[-1]
-                read_names.add(read_name)
-
-                # Extract the allele name and add it to the list
-                allele = line.strip().split('\t')[-2]
-                alleles.add(allele)
 
         # Update the sample dictionary
-        sequence_dict['read_names'] = sorted(list(read_names))
-        sequence_dict['alleles'] = sorted(list(alleles))
+        sequence_dict['baited_targets'] = baited_targets
 
-    return sample_dict
+        # Convert the identity to a fraction
+        fraction = identity / 100
 
+        # Create the system call
+        bbduk_call = (
+            f'bbduk.sh ref={sequence_dict['baited_reads']} '
+            f'outm={baited_targets} '
+            f'in={db_fasta} '
+            f'mincovfraction={fraction} '
+            '--maskmiddle=f '
+            '--fixjunk'
+        )
 
-def _ensure_forward_reverse(
-    *,  # Enforce keyword arguments
-    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
-) -> Dict[str, Dict[str, Union[List[str], str]]]:
-    """
-    Ensure that both forward and reverse reads are present in the read_names
-    list. If one direction is missing, add it to the list.
+        logging.info('System call: %s', bbduk_call)
 
-    Args:
-        sample_dict: Dictionary containing the sample information
-
-    Returns:
-        dict: The updated sample dictionary
-    """
-    # Iterate through the samples
-    for _, sequence_dict in sample_dict.items():
-
-        # Use a set for efficient membership checking
-        read_names = set(sequence_dict['read_names'])
-
-        # Create a copy
-        updated_read_names = set(read_names)
-
-        # Iterate through a copy of the set
-        for read_name in list(read_names):
-            if ' 1' in read_name:
-                reverse_read_name = read_name.replace(' 1', ' 2')
-                updated_read_names.add(reverse_read_name)
-            elif ' 2' in read_name:
-                forward_read_name = read_name.replace(' 2', ' 1')
-                updated_read_names.add(forward_read_name)
-
-        # Convert back to a sorted list
-        sequence_dict['read_names'] = sorted(list(updated_read_names))
-
-    return sample_dict
-
-
-def extract_reads_bbmap(
-    sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
-) -> Dict[str, Dict[str, Union[List[str], str]]]:
-    """
-    Extracts reads from paired FASTQ files using BBMap's filterbyname.sh.
-
-    Args:
-        sample_dict: Dict with sample information.
-
-    Returns:
-        Dict with updated sample information.
-    """
-    for sample, sequence_dict in sample_dict.items():
-
-        # Ensure there are two files (paired-end reads)
-        if len(sequence_dict['files']) != 2:
-            logging.error(
-                "Error: Expected two FASTQ files for paired-end reads."
+        # Run the command if the outputs do not already exist
+        if not os.path.exists(baited_targets):
+            output = run_command(
+                command=bbduk_call, split=False
             )
-            continue  # Skip to the next sample
-
-        fastq_file1 = sequence_dict['files'][0]
-        fastq_file2 = sequence_dict['files'][1]
-
-        # Set the name of the output files
-        output_fastq1 = os.path.join(
-            sequence_dict['output_path'],
-            f'{sample}_R1.fastq.gz'
-        )
-        output_fastq2 = os.path.join(
-            sequence_dict['output_path'],
-            f'{sample}_R2.fastq.gz'
-        )
-
-        # Add the output files to the list
-        sequence_dict['mapped_reads'] = [output_fastq1, output_fastq2]
-
-        # Only extract reads if the output files do not already exist
-        if os.path.exists(output_fastq1) and os.path.exists(output_fastq2):
-            if (
-                os.path.getsize(output_fastq1) > 0
-                and os.path.getsize(output_fastq2) > 0
-            ):
-                logging.info(
-                    "Output files already exist for sample: %s", sample
-                )
-                continue
-
-        # Extract the read names
-        read_names = sequence_dict['read_names']
-
-        # Create a file to store the read names
-        names_file = os.path.join(
-            sequence_dict['output_path'],
-            f'{sample}_names.txt'
-        )
-
-        try:
-            # Write the read names to file
-            with open(names_file, 'w', encoding='utf-8') as reads_file:
-                for read_name in read_names:
-                    reads_file.write(read_name + '\n')
-
-            # Construct the BBMap command
-            bbmap_cmd = [
-                'filterbyname.sh',
-                f'in={fastq_file1}',
-                f'in2={fastq_file2}',
-                f'out={output_fastq1}',
-                f'out2={output_fastq2}',
-                f'names={names_file}',
-                'overwrite=t'  # Add overwrite flag
-            ]
-
-            # Execute the BBMap command
-            with subprocess.Popen(
-                bbmap_cmd, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            ) as process:
-                _, stderr = process.communicate()
-
-                if stderr:
-                    logging.error(
-                        "BBMap error: %s", stderr.decode()
-                    )
-
-        except FileNotFoundError:
-            logging.error(
-                "Error: Input FASTQ not found."
-            )
-        except Exception as exc:
-            logging.error("An error occurred: %s", exc)
-            raise SystemExit from exc
-
-        # Sort the list of mapped reads
-        sequence_dict['mapped_reads'] = sorted(
-            sequence_dict['mapped_reads']
-        )
+            logging.debug('BBMap output: %s', output.stdout)
 
     return sample_dict
 
 
 def _extract_sequences(
     *,  # Enforce keyword arguments
-    db_fasta: str,
     sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
 ) -> Dict[str, Dict[str, Union[List[str], str]]]:
     """
     Extract the sample-specific matching alleles from the database file
 
     Args:
-        db_fasta (str): Path to the gene-specific FASTA file
         sample_dict (dict): Dictionary containing the sample information
 
     Returns:
@@ -466,18 +299,17 @@ def _extract_sequences(
 
     for _, sequence_dict in sample_dict.items():
 
-        with open(db_fasta, 'r', encoding='utf-8') as fasta_file:
+        # Extract the baited targets
+        baited_targets = sequence_dict['baited_targets']
+
+        with open(baited_targets, 'r', encoding='utf-8') as fasta_file:
             # Create a list to store the sequences
             sequences = []
-
-            # Extract the allele names
-            alleles = set(sequence_dict['alleles'])
 
             # Iterate through the FASTA records
             records = SeqIO.parse(fasta_file, 'fasta')
             for record in records:
-                if record.id in alleles:
-                    sequences.append(record)
+                sequences.append(record)
 
             # Update the sample dictionary
             sequence_dict['allele_sequences'] = sequences
@@ -535,27 +367,38 @@ def _write_allele_sequences(
             sequence_dict['allele_output_paths'].append(allele_output_path)
             sequence_dict['allele_sequence_files'].append(output_fasta)
 
-            # Write the sequence to the output file
-            with open(output_fasta, 'w', encoding='utf-8') as fasta_file:
-                # Write a list containing the single record
-                SeqIO.write([record], fasta_file, 'fasta')
+            # Only write the sequence if the file does not already exist
+            if not os.path.exists(output_fasta):
+                # Write the sequence to the output file
+                with open(output_fasta, 'w', encoding='utf-8') as fasta_file:
+                    # Write a list containing the single record
+                    SeqIO.write([record], fasta_file, 'fasta')
 
     return sample_dict
 
 
 def _index_allele_sequences(
     *,  # Enforce keyword arguments
-    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
+    sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
+    threads: int
 ) -> Dict[str, Dict[str, Union[List[str], str]]]:
     """
     Use KMA to index the allele sequences
 
     Args:
         sample_dict: Dictionary containing the sample information
+        threads: Number of threads to use
 
     Returns:
         dict: The updated sample dictionary
     """
+
+    # Create a list to store the KMA commands
+    kma_commands = []
+
+    # Create a list to store the report files
+    report_files = []
+
     for _, sequence_dict in sample_dict.items():
         # Initialize a list to store the allele databases
         sequence_dict['kma_sample_db'] = []
@@ -574,17 +417,23 @@ def _index_allele_sequences(
                 f'kma index -i {allele_fasta} -o {allele_db}'
             )
 
-            logging.info('KMA index command: %s', kma_index_cmd)
+            logging.debug('KMA index command: %s', kma_index_cmd)
 
-            # Run the command if the index does not already exist
-            if not os.path.exists(allele_db + '.name'):
-                try:
-                    # Execute the KMA index command
-                    output = run_command(command=kma_index_cmd)
-                    logging.debug('KMA index output: %s', output.stdout)
-                except subprocess.CalledProcessError as exc:
-                    logging.error("Command failed: %s", exc)
-                    raise
+            # Add the KMA command to the list
+            kma_commands.append(kma_index_cmd)
+
+            # Construct the report file name
+            report_file = allele_db + '.name'
+
+            # Add the report file to the list
+            report_files.append(report_file)
+
+    # Run the KMA commands in parallel
+    _run_kma_commands_in_parallel(
+        kma_commands=kma_commands,
+        report_files=report_files,
+        threads=threads
+    )
 
     return sample_dict
 
@@ -607,12 +456,14 @@ def _map_allele_sequences_kma(
     Returns:
         dict: The updated sample dictionary
     """
-    for _, sequence_dict in sample_dict.items():
-        # Create a list to store the KMA commands
-        kma_commands = []
+    # Create a list to store the KMA commands
+    kma_commands = []
 
-        # Create a list to store the report files
-        report_files = []
+    # Create a list to store the report files
+    report_files = []
+
+    for _, sequence_dict in sample_dict.items():
+
         sequence_dict['kma_report_files'] = []
 
         # Iterate through the allele databases
@@ -623,7 +474,7 @@ def _map_allele_sequences_kma(
 
             # Construct the KMA command
             kma_cmd = (
-                f'kma -ipe {" ".join(sequence_dict["files"])} '
+                f'kma -int {sequence_dict['baited_reads']} '
                 f'-o {output_path} '
                 f'-t_db {allele_db} '
                 f'-ID {identity} '  # Identity threshold
@@ -635,14 +486,14 @@ def _map_allele_sequences_kma(
             report_files.append(report_file)
 
             # Update the sample dictionary
-            sequence_dict['kma_report_files'] = report_files
+            sequence_dict['kma_report_files'].append(report_file)
 
-        # Run the KMA commands in parallel
-        _run_kma_commands_in_parallel(
-            kma_commands=kma_commands,
-            report_files=report_files,
-            threads=threads
-        )
+    # Run the KMA commands in parallel
+    _run_kma_commands_in_parallel(
+        kma_commands=kma_commands,
+        report_files=report_files,
+        threads=threads
+    )
 
     return sample_dict
 
@@ -695,6 +546,7 @@ def _parse_allele_reports(
         best_hits = {}
         best_scores = {}
         best_hit_files = {}
+        allele_db = {}
 
         # Iterate through the report files
         for report_file in sequence_dict['kma_report_files']:
@@ -734,15 +586,25 @@ def _parse_allele_reports(
                     except ValueError:
                         pass
 
+        # Create a dictionary of allele name: allele db path
+        for _, allele in best_hits.items():
+            for allele_db_file in sequence_dict['allele_output_paths']:
+                # Ensure that the allele exists
+                if not allele:
+                    continue
+                # Check if the allele is in the allele database
+                if allele.replace('.', '_') in allele_db_file:
+                    allele_db[allele] = allele_db_file
+
         # Update the sample dictionary
         sequence_dict['best_hits'] = best_hits
         sequence_dict['best_scores'] = best_scores
         sequence_dict['best_hit_files'] = best_hit_files
+        sequence_dict['allele_db'] = allele_db
 
-        print('best_hits:', sequence_dict['best_hits'])
-        print('best_scores:', sequence_dict['best_scores'])
-        
-    quit()
+        for allele, identity in sequence_dict['best_scores'].items():
+            print('\t', allele, identity, sequence_dict['best_hits'][allele])
+
     return sample_dict
 
 
@@ -762,7 +624,7 @@ def _find_gene_name(
     return os.path.basename(allele).split('_')[0]
 
 
-def map_reads_bwa(
+def _map_reads_bwa(
     *,  # Enforce keyword arguments
     sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
     threads: int
@@ -777,88 +639,104 @@ def map_reads_bwa(
     Returns:
         dict: The updated sample dictionary
     """
-    for sample, sequence_dict in sample_dict.items():
+    for _, sequence_dict in sample_dict.items():
 
-        # Set the name of the .fsa output file from KMA to be used as the
-        # reference alleles
-        reference_allele = sequence_dict['kma_sample_db'] + '.fsa'
+        # Initialise a dictionary to store the BWA output
+        sequence_dict['bwa_output'] = {}
 
-        # Index the reference allele if it was not already done
-        if not os.path.exists(reference_allele + '.bwt'):
-            _index_reference_allele(reference_allele=reference_allele)
+        # Initialise a dictionary to store the allele database
+        sequence_dict['reference_allele_file'] = {}
 
-        # Set the name of the output file
-        output_bam = os.path.join(
-            sequence_dict['output_path'],
-            f'{sample}.bam'
-        )
+        for allele, allele_db in sequence_dict['allele_db'].items():
 
-        # Update the sample dictionary
-        sequence_dict['bwa_output'] = output_bam
+            # Set the name of the .fsa output file from KMA to be used as the
+            # reference alleles
+            reference_allele = allele_db + '.fsa'
 
-        # Construct BWA command
-        bwa_cmd = [
-            'bwa', 'mem', '-t', str(threads), reference_allele,
-            sequence_dict["mapped_reads"][0],
-            sequence_dict["mapped_reads"][1]
-        ]
+            # Extract the parent directory of the reference allele
+            reference_allele_dir = os.path.dirname(allele_db)
 
-        # Construct Samtools view command
-        samtools_view_cmd = ['samtools', 'view', '-Sb', '-']
+            # Index the reference allele if it was not already done
+            if not os.path.exists(reference_allele + '.bwt'):
+                _index_reference_allele(reference_allele=reference_allele)
 
-        # Construct Samtools sort command
-        samtools_sort_cmd = ['samtools', 'sort', '-o', output_bam]
+            # Set the name of the output file
+            output_bam = os.path.join(
+                reference_allele_dir,
+                f'{allele}.bam'
+            )
 
-        logging.info('BWA command: %s', ' '.join(bwa_cmd))
-        logging.info('Samtools view command: %s', ' '.join(samtools_view_cmd))
-        logging.info('Samtools sort command: %s', ' '.join(samtools_sort_cmd))
+            # Update the sample dictionaries
+            sequence_dict['bwa_output'][allele] = output_bam
+            sequence_dict['reference_allele_file'][allele] = reference_allele
 
-        # Run the command if the output does not already exist
-        if not os.path.exists(output_bam):
-            try:
-                # Execute BWA
-                bwa_process = subprocess.Popen(
-                    bwa_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
+            # Construct BWA command
+            bwa_cmd = [
+                'bwa', 'mem', '-t', str(threads), reference_allele,
+                sequence_dict['baited_reads']
+            ]
 
-                # Execute Samtools view
-                samtools_view_process = subprocess.Popen(
-                    samtools_view_cmd, stdin=bwa_process.stdout,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                bwa_process.stdout.close()  # Allow BWA to exit
+            # Construct Samtools view command
+            samtools_view_cmd = ['samtools', 'view', '-Sb', '-']
 
-                # Execute Samtools sort
-                samtools_sort_process = subprocess.Popen(
-                    samtools_sort_cmd, stdin=samtools_view_process.stdout,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                # Allow samtools view to exit
-                samtools_view_process.stdout.close()
+            # Construct Samtools sort command
+            samtools_sort_cmd = ['samtools', 'sort', '-o', output_bam]
 
-                # Get the output and error messages
-                _, stderr = samtools_sort_process.communicate()
+            logging.debug('BWA command: %s', ' '.join(bwa_cmd))
+            logging.debug(
+                'Samtools view command: %s', ' '.join(samtools_view_cmd)
+            )
+            logging.debug(
+                'Samtools sort command: %s', ' '.join(samtools_sort_cmd)
+            )
 
-                if stderr:
+            # Run the command if the output does not already exist
+            if not os.path.exists(output_bam):
+                try:
+                    # Execute BWA
+                    bwa_process = subprocess.Popen(
+                        bwa_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+
+                    # Execute Samtools view
+                    samtools_view_process = subprocess.Popen(
+                        samtools_view_cmd, stdin=bwa_process.stdout,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    bwa_process.stdout.close()  # Allow BWA to exit
+
+                    # Execute Samtools sort
+                    samtools_sort_process = subprocess.Popen(
+                        samtools_sort_cmd, stdin=samtools_view_process.stdout,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    )
+                    # Allow samtools view to exit
+                    samtools_view_process.stdout.close()
+
+                    # Get the output and error messages
+                    _, stderr = samtools_sort_process.communicate()
+
+                    if stderr:
+                        logging.error(
+                            "Error: %s", stderr.decode()
+                        )
+                    else:
+                        logging.debug(
+                            'BWA/Samtools pipeline completed successfully'
+                        )
+
+                    # Index the BAM file
+                    _index_bam_file(bam_file=output_bam)
+
+                except FileNotFoundError as exc:
                     logging.error(
-                        "Error: %s", stderr.decode()
+                        "Error: One of the required executables not found: %s",
+                        exc
                     )
-                else:
-                    logging.debug(
-                        'BWA/Samtools pipeline completed successfully'
-                    )
-
-                # Index the BAM file
-                _index_bam_file(bam_file=output_bam)
-
-            except FileNotFoundError as exc:
-                logging.error(
-                    "Error: One of the required executables not found: %s", exc
-                )
-                raise SystemExit from exc
-            except Exception as exc:
-                logging.error("An error occurred: %s", exc)
-                raise SystemExit from exc
+                    raise SystemExit from exc
+                except Exception as exc:
+                    logging.error("An error occurred: %s", exc)
+                    raise SystemExit from exc
 
     return sample_dict
 
@@ -876,12 +754,13 @@ def _index_reference_allele(
     # Create the system call
     index_cmd = f'bwa index {reference_allele}'
 
-    logging.info('System call: %s', ' '.join(index_cmd))
+    logging.debug('System call: %s', index_cmd)
 
     try:
         # Run the command
         output = run_command(
             command=index_cmd,
+            split=False
         )
         logging.debug('BWA index output: %s', output.stdout)
     except subprocess.CalledProcessError as exc:
@@ -904,6 +783,10 @@ def _index_bam_file(
 
     logging.info('Samtools index command: %s', ' '.join(index_cmd))
 
+    # Only run the command if the index file does not already exist
+    if os.path.exists(bam_file + '.bai'):
+        return
+
     try:
         # Run the samtools index command
         output = subprocess.run(
@@ -913,6 +796,289 @@ def _index_bam_file(
     except subprocess.CalledProcessError as exc:
         logging.error("Samtools index command failed: %s", exc)
         raise
+
+
+def _consensus_sequence(
+    *,  # Enforce keyword arguments,
+    sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
+    min_coverage: int = 1,
+    min_quality: int = 20
+) -> Dict[str, Dict[str, Union[List[str], str]]]:
+    """
+    Iterate through the BWA output files to extract the consensus sequences
+
+    Args:
+        sample_dict: Dictionary containing the sample information
+        min_coverage: Minimum coverage required to call a base
+        min_quality: Minimum base quality required to consider a base
+
+    Returns:
+        dict: The updated sample dictionary
+    """
+    for _, sequence_dict in sample_dict.items():
+        print(_)
+        # Initialize a dictionary to store the consensus sequences
+        sequence_dict['consensus_sequences'] = {}
+
+        for allele, bam_file in sequence_dict['bwa_output'].items():
+            print('\t', allele)
+            # Extract the consensus sequence
+            consensus_sequence = _extract_consensus_sequence(
+                bam_file=bam_file,
+                min_coverage=min_coverage,
+                min_quality=min_quality
+            )
+            # print('\t', allele, '\n\t', consensus_sequence)
+
+            # Update the sample dictionary
+            sequence_dict['consensus_sequences'][allele] = consensus_sequence
+
+    return sample_dict
+
+
+def reverse_complement(
+    *,  # Enforce keyword arguments
+    seq: str
+):
+    """
+    Returns the reverse complement of a DNA sequence.
+
+    Args:
+        seq: A string representing the DNA sequence.
+
+    Returns:
+        A string representing the reverse complement of the input sequence.
+    """
+    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'N': 'N'}
+    return ''.join(complement[base] for base in reversed(seq))
+
+
+def create_pseudo_alignment(soft_clips_by_position):
+    """
+    Creates a pseudo-alignment of soft-clipped sequences, grouped by reference
+    position.
+
+    Args:
+        soft_clips_by_position: A dictionary where keys are reference
+        positions and values are lists of soft clip data dictionaries.
+
+    Returns:
+        A tuple containing:
+            - A string representing the column-aligned sequences.
+            - A list of the padded sequences.
+    """
+
+    pseudo_alignments = {}
+
+    for ref_pos, soft_clip_data_list in soft_clips_by_position.items():
+        # Determine the minimum relative alignment start
+        min_start = min(data['relative_alignment_start'] for data in soft_clip_data_list)
+
+        # Determine the maximum length of the aligned sequences
+        max_length = 0
+        for data in soft_clip_data_list:
+            length = len(data['sequence']) - data['relative_alignment_start']
+            if length > max_length:
+                max_length = length
+
+        # Create padded sequences
+        padded_sequences = []
+        for data in soft_clip_data_list:
+            sequence = data['sequence']
+            start = data['relative_alignment_start']
+            padding_left = '-' * abs(min_start + start)
+            padding_right = '-' * (max_length - len(sequence) + start)
+            padded_sequence = padding_left + sequence + padding_right
+            padded_sequences.append(padded_sequence)
+
+        # Create column-aligned string
+        column_alignment = ""
+        for seq in padded_sequences:
+            column_alignment += seq + "\n"  # Add the whole sequence and a newline
+
+        # Store the pseudo-alignment
+        pseudo_alignments[ref_pos] = (column_alignment, padded_sequences)
+
+    return pseudo_alignments
+
+def _extract_consensus_sequence(
+    *,  # Enforce keyword arguments
+    bam_file: str,
+    min_coverage: int = 1,
+    min_quality: int = 20,
+    debug_allele: str = "Stx2a_1_X07865"  # Added debug_allele parameter
+) -> str:
+    """
+    Extracts the consensus sequence from a sorted BAM file, including
+    internal soft clips, but excluding soft clips that extend beyond the
+    reference sequence boundaries.
+
+    Args:
+        bam_file: Path to the sorted BAM file.
+        min_coverage: Minimum coverage required to call a base.
+        min_quality: Minimum base quality for a base to be considered.
+        debug_allele: The allele to print debug information for.
+
+    Returns:
+        The consensus sequence as a string.
+    """
+
+    # Open the BAM file
+    sam_file = pysam.AlignmentFile(bam_file, "rb")
+
+    # Get the reference sequence length. Assuming only one reference
+    # sequence in the BAM file
+    ref_len = sam_file.lengths[0]
+    ref_name = sam_file.references[0]
+
+    # Initialize a dictionary to store base counts at each position
+    base_counts = defaultdict(
+        lambda: {
+            'A': 0, 'C': 0, 'G': 0, 'T': 0, 'N': 0
+        }
+    )
+
+    # Initialize a dictionary to store soft-clipped sequences, grouped by reference position
+    soft_clips_by_position = defaultdict(list)
+
+    # Iterate through the aligned reads
+    for read in sam_file.fetch(ref_name, 0, ref_len):
+
+        # Get the aligned positions
+        aligned_positions = read.get_reference_positions(full_length=True)
+
+        # Get the query sequence
+        query_sequence = read.query_sequence
+
+        # Get the CIGAR string
+        cigar = read.cigartuples
+
+        # Iterate through the CIGAR operations
+        query_pos = 0
+        ref_pos = read.reference_start  # Start position on the reference
+        ref_end = read.reference_end
+
+        for operation, length in cigar:
+            if operation == pysam.CMATCH or operation == pysam.CEQUAL or operation == pysam.CDIFF:
+                # Match or mismatch
+                for i in range(length):
+                    if ref_pos < ref_len:  # Only consider positions within the reference
+                        base = query_sequence[query_pos]
+                        base_counts[ref_pos][base] += 1
+                    query_pos += 1
+                    ref_pos += 1
+            elif operation == pysam.CINS:
+                # Insertion (soft clip within the alignment)
+                insertion_seq = query_sequence[query_pos:query_pos + length]
+                # Consider the insertion as contributing to the *next* reference position
+                if ref_pos < ref_len:
+                    for base in insertion_seq:
+                        base_counts[ref_pos]['I:' + base] = base_counts[ref_pos].get('I:' + base, 0) + 1
+                query_pos += length
+            elif operation == pysam.CDEL:
+                # Deletion
+                ref_pos += length
+            elif operation == pysam.CSOFT_CLIP:
+                # Soft clip - ignore if at the start or end of the alignment
+                five_prime_clip = (ref_pos <= 10)  # Within 10 bases of the start
+                three_prime_clip = (ref_pos + length >= ref_len - 10)  # Within 10 bases of the end
+                cigar_left_clip = (query_pos == 0)
+                cigar_right_clip = (query_pos + length == len(query_sequence))
+
+                # Calculate the soft clip position
+                soft_clip_pos = ref_pos
+
+                if debug_allele in ref_name and not five_prime_clip and not three_prime_clip:
+                    print(f"Debugging read: {read.query_name}")
+                    print(f"  Cigar string: {read.cigartuples}")
+                    print(f"  Reference start: {read.reference_start}")
+                    print(f"  Reference end: {read.reference_end}")
+                    print(f"  Query sequence: {read.query_sequence}")
+                    print(f"  Soft clip at ref_pos {soft_clip_pos}, length {length}")
+                    print(f"  Ref pos: {ref_pos}, ref length: {ref_len}")
+                    print(f"    Is left clip: {five_prime_clip}, Is right clip: {three_prime_clip}")
+                    print(f"    Is cigar left clip: {cigar_left_clip}, is cigar right clip: {cigar_right_clip}")
+                    clip_seq = query_sequence[query_pos:query_pos + length]
+                    # Adjust clip_seq for reverse reads
+                    if read.is_reverse:
+                        clip_seq = reverse_complement(clip_seq)
+                    # Calculate relative alignment start
+                    if cigar_left_clip:
+                        relative_alignment_start = -length
+                    else:
+                        relative_alignment_start = 0
+                    print(f"    Clip seq : {clip_seq}")
+                    print(f"    Orientation: {'+' if not read.is_reverse else '-'}")
+                    print(f"    Relative alignment start: {relative_alignment_start}")
+
+                # Extract internal soft clips
+                if not five_prime_clip and not three_prime_clip:
+                    clip_seq = query_sequence[query_pos:query_pos + length]
+                    # Adjust clip_seq for reverse reads
+                    if read.is_reverse:
+                        clip_seq = reverse_complement(clip_seq)
+
+                    # Calculate relative alignment start
+                    if cigar_left_clip:
+                        relative_alignment_start = -length
+                    else:
+                        relative_alignment_start = 0
+
+                    soft_clip_data = {
+                        "sequence": clip_seq,
+                        "ref_pos": ref_pos,
+                        "query_pos": query_pos,
+                        "length": length,
+                        "five_prime_clip": five_prime_clip,
+                        "three_prime_clip": three_prime_clip,
+                        "cigar_left_clip": cigar_left_clip,
+                        "cigar_right_clip": cigar_right_clip,
+                        "orientation": "+" if not read.is_reverse else "-",  # Add orientation
+                        "read_name": read.query_name,
+                        "relative_alignment_start": relative_alignment_start
+                    }
+                    soft_clips_by_position[ref_pos].append(soft_clip_data)
+                    # Again, contribute to the *next* reference position
+                    if ref_pos < ref_len:
+                        for base in clip_seq:
+                            base_counts[ref_pos]['S:' + base] = base_counts[ref_pos].get('S:' + base, 0) + 1
+                query_pos += length
+            elif operation == pysam.CREF_SKIP:
+                # Reference skip
+                ref_pos += length
+            elif operation == pysam.CHARD_CLIP or operation == pysam.CPAD:
+                # Hard clip or padding - ignore
+                pass
+            else:
+                raise ValueError(f"Unexpected CIGAR operation: {operation}")
+
+    # Determine the consensus base at each position
+    consensus_sequence = ""
+    for pos in range(ref_len):
+        # Find the base with the highest count
+        max_base = 'N'
+        max_count = 0
+        for base, count in base_counts[pos].items():
+            if count > max_count:
+                max_base = base
+                max_count = count
+        consensus_sequence += max_base
+
+    # Close the BAM file
+    sam_file.close()
+
+    # Create pseudo-alignments
+    pseudo_alignments = create_pseudo_alignment(soft_clips_by_position)
+    if debug_allele in ref_name:
+        for pos, (column_alignment, padded_sequences) in pseudo_alignments.items():
+            if pos == 906:
+                print(f"Pseudo-alignments at position {pos}:")
+                print(column_alignment)
+                # print("Padded Sequences:")
+                # for seq in padded_sequences:
+                    # print(seq)
+
+    return consensus_sequence
 
 
 def run_command(
@@ -993,8 +1159,8 @@ def cli():
     )
     parser.add_argument(
         '-ID', '--identity',
-        default=95,
-        help='Minimum identity percentage for KMA hits. Default is 95%'
+        default=99,
+        help='Minimum identity percentage for KMA hits. Default is 99%'
     )
     parser.add_argument(
         '--verbosity',
