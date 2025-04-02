@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shlex
+import statistics
 import subprocess
 from typing import (
     Dict,
@@ -127,8 +128,8 @@ def main(
         threads=threads
     )
 
-    logging.info('Extracting consensus sequences from the BWA output')
-    sample_dict = _consensus_sequence(sample_dict=sample_dict)
+    logging.info('Extracting consensus insertions from the BWA output')
+    sample_dict = _extract_consensus_insertions(sample_dict=sample_dict)
 
 
 def _find_samples(
@@ -351,7 +352,7 @@ def _write_allele_sequences(
             allele_output_path = os.path.join(
                 output_path,
                 record_id,
-                record_id
+                record_id + '_db'
             )
 
             # Create the directory if it does not already exist
@@ -478,6 +479,8 @@ def _map_allele_sequences_kma(
                 f'-o {output_path} '
                 f'-t_db {allele_db} '
                 f'-ID {identity} '  # Identity threshold
+                '-mem_mode '        # Memory mode
+                '-a '               # Output all matches
             )
             kma_commands.append(kma_cmd)
 
@@ -540,7 +543,7 @@ def _parse_allele_reports(
         dict: The updated sample dictionary
     """
     for _, sequence_dict in sample_dict.items():
-        print(_)
+
         # Create a dictionaries to store the best hits, best scores, and
         # best hit files
         best_hits = {}
@@ -601,9 +604,6 @@ def _parse_allele_reports(
         sequence_dict['best_scores'] = best_scores
         sequence_dict['best_hit_files'] = best_hit_files
         sequence_dict['allele_db'] = allele_db
-
-        for allele, identity in sequence_dict['best_scores'].items():
-            print('\t', allele, identity, sequence_dict['best_hits'][allele])
 
     return sample_dict
 
@@ -798,19 +798,19 @@ def _index_bam_file(
         raise
 
 
-def _consensus_sequence(
+def _extract_consensus_insertions(
     *,  # Enforce keyword arguments,
     sample_dict: Dict[str, Dict[str, Union[List[str], str]]],
-    min_coverage: int = 1,
-    min_quality: int = 20
+    min_coverage: float = 0.5,
 ) -> Dict[str, Dict[str, Union[List[str], str]]]:
     """
     Iterate through the BWA output files to extract the consensus sequences
 
     Args:
         sample_dict: Dictionary containing the sample information
-        min_coverage: Minimum coverage required to call a base
-        min_quality: Minimum base quality required to consider a base
+         min_coverage: Minimum *fraction* of reads required to call a consensus
+        insertion. For example, 0.5 means the insertion must be present in at
+        least 50% of reads covering that position.
 
     Returns:
         dict: The updated sample dictionary
@@ -818,267 +818,142 @@ def _consensus_sequence(
     for _, sequence_dict in sample_dict.items():
         print(_)
         # Initialize a dictionary to store the consensus sequences
-        sequence_dict['consensus_sequences'] = {}
+        sequence_dict['insertions'] = {}
 
         for allele, bam_file in sequence_dict['bwa_output'].items():
-            print('\t', allele)
-            # Extract the consensus sequence
-            consensus_sequence = _extract_consensus_sequence(
+
+            # Calculate the consensus internal insertions
+            insertions = _find_consensus_internal_insertions(
                 bam_file=bam_file,
                 min_coverage=min_coverage,
-                min_quality=min_quality
             )
-            # print('\t', allele, '\n\t', consensus_sequence)
 
             # Update the sample dictionary
-            sequence_dict['consensus_sequences'][allele] = consensus_sequence
+            sequence_dict['insertions'][allele] = insertions
 
     return sample_dict
 
 
-def reverse_complement(
-    *,  # Enforce keyword arguments
-    seq: str
-):
-    """
-    Returns the reverse complement of a DNA sequence.
-
-    Args:
-        seq: A string representing the DNA sequence.
-
-    Returns:
-        A string representing the reverse complement of the input sequence.
-    """
-    complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'N': 'N'}
-    return ''.join(complement[base] for base in reversed(seq))
-
-
-def create_pseudo_alignment(soft_clips_by_position):
-    """
-    Creates a pseudo-alignment of soft-clipped sequences, grouped by reference
-    position.
-
-    Args:
-        soft_clips_by_position: A dictionary where keys are reference
-        positions and values are lists of soft clip data dictionaries.
-
-    Returns:
-        A tuple containing:
-            - A string representing the column-aligned sequences.
-            - A list of the padded sequences.
-    """
-
-    pseudo_alignments = {}
-
-    for ref_pos, soft_clip_data_list in soft_clips_by_position.items():
-        # Determine the minimum relative alignment start
-        min_start = min(data['relative_alignment_start'] for data in soft_clip_data_list)
-
-        # Determine the maximum length of the aligned sequences
-        max_length = 0
-        for data in soft_clip_data_list:
-            length = len(data['sequence']) - data['relative_alignment_start']
-            if length > max_length:
-                max_length = length
-
-        # Create padded sequences
-        padded_sequences = []
-        for data in soft_clip_data_list:
-            sequence = data['sequence']
-            start = data['relative_alignment_start']
-            padding_left = '-' * abs(min_start + start)
-            padding_right = '-' * (max_length - len(sequence) + start)
-            padded_sequence = padding_left + sequence + padding_right
-            padded_sequences.append(padded_sequence)
-
-        # Create column-aligned string
-        column_alignment = ""
-        for seq in padded_sequences:
-            column_alignment += seq + "\n"  # Add the whole sequence and a newline
-
-        # Store the pseudo-alignment
-        pseudo_alignments[ref_pos] = (column_alignment, padded_sequences)
-
-    return pseudo_alignments
-
-def _extract_consensus_sequence(
-    *,  # Enforce keyword arguments
+def _find_consensus_internal_insertions(
     bam_file: str,
-    min_coverage: int = 1,
-    min_quality: int = 20,
-    debug_allele: str = "Stx2a_1_X07865"  # Added debug_allele parameter
-) -> str:
+    min_coverage: float = 0.5,
+) -> list[tuple[int, int]]:
     """
-    Extracts the consensus sequence from a sorted BAM file, including
-    internal soft clips, but excluding soft clips that extend beyond the
-    reference sequence boundaries.
+    Identifies consensus internal insertions (from CINS and CSCLIP) from a
+    sorted BAM file.
 
     Args:
         bam_file: Path to the sorted BAM file.
-        min_coverage: Minimum coverage required to call a base.
-        min_quality: Minimum base quality for a base to be considered.
-        debug_allele: The allele to print debug information for.
+        min_coverage: Minimum *fraction* of reads required to call a consensus
+        insertion. For example, 0.5 means the insertion must be present in at
+        least 50% of reads covering that position.
 
     Returns:
-        The consensus sequence as a string.
+        A list of tuples, where each tuple contains the reference position
+        of the insertion and the median length of the insertions at that
+        position.
+        **Positions are reported in 1-based coordinates.**
+        Returns an empty list if no consensus insertions are found.
     """
-
     # Open the BAM file
     sam_file = pysam.AlignmentFile(bam_file, "rb")
 
-    # Get the reference sequence length. Assuming only one reference
-    # sequence in the BAM file
+    # Get the reference length and name 
     ref_len = sam_file.lengths[0]
     ref_name = sam_file.references[0]
 
-    # Initialize a dictionary to store base counts at each position
-    base_counts = defaultdict(
-        lambda: {
-            'A': 0, 'C': 0, 'G': 0, 'T': 0, 'N': 0
-        }
-    )
+    # Store lengths of insertions at each position
+    insertion_positions = defaultdict(list)
+    total_reads_at_position = defaultdict(int)
 
-    # Initialize a dictionary to store soft-clipped sequences, grouped by reference position
-    soft_clips_by_position = defaultdict(list)
-
-    # Iterate through the aligned reads
     for read in sam_file.fetch(ref_name, 0, ref_len):
-
-        # Get the aligned positions
         aligned_positions = read.get_reference_positions(full_length=True)
 
-        # Get the query sequence
-        query_sequence = read.query_sequence
+        # Count total reads at each covered position
+        for pos in aligned_positions:
+            # Handle reads with deletions (None in aligned_positions)
+            if pos is not None:
+                total_reads_at_position[pos] += 1
 
-        # Get the CIGAR string
+        # Extract CIGAR operations
         cigar = read.cigartuples
 
-        # Iterate through the CIGAR operations
+        # Initialize positions
         query_pos = 0
-        ref_pos = read.reference_start  # Start position on the reference
-        ref_end = read.reference_end
+        ref_pos = read.reference_start
 
+        # Iterate through CIGAR operations
         for operation, length in cigar:
-            if operation == pysam.CMATCH or operation == pysam.CEQUAL or operation == pysam.CDIFF:
-                # Match or mismatch
-                for i in range(length):
-                    if ref_pos < ref_len:  # Only consider positions within the reference
-                        base = query_sequence[query_pos]
-                        base_counts[ref_pos][base] += 1
-                    query_pos += 1
-                    ref_pos += 1
-            elif operation == pysam.CINS:
-                # Insertion (soft clip within the alignment)
-                insertion_seq = query_sequence[query_pos:query_pos + length]
-                # Consider the insertion as contributing to the *next* reference position
-                if ref_pos < ref_len:
-                    for base in insertion_seq:
-                        base_counts[ref_pos]['I:' + base] = base_counts[ref_pos].get('I:' + base, 0) + 1
-                query_pos += length
-            elif operation == pysam.CDEL:
-                # Deletion
+
+            # Match or equal
+            if operation in [pysam.CMATCH, pysam.CEQUAL, pysam.CDIFF]:
                 ref_pos += length
-            elif operation == pysam.CSOFT_CLIP:
-                # Soft clip - ignore if at the start or end of the alignment
-                five_prime_clip = (ref_pos <= 10)  # Within 10 bases of the start
-                three_prime_clip = (ref_pos + length >= ref_len - 10)  # Within 10 bases of the end
-                cigar_left_clip = (query_pos == 0)
-                cigar_right_clip = (query_pos + length == len(query_sequence))
+                query_pos += length
 
-                # Calculate the soft clip position
-                soft_clip_pos = ref_pos
+            # Deletion
+            elif operation == pysam.CDEL:
+                ref_pos += length
 
-                if debug_allele in ref_name and not five_prime_clip and not three_prime_clip:
-                    print(f"Debugging read: {read.query_name}")
-                    print(f"  Cigar string: {read.cigartuples}")
-                    print(f"  Reference start: {read.reference_start}")
-                    print(f"  Reference end: {read.reference_end}")
-                    print(f"  Query sequence: {read.query_sequence}")
-                    print(f"  Soft clip at ref_pos {soft_clip_pos}, length {length}")
-                    print(f"  Ref pos: {ref_pos}, ref length: {ref_len}")
-                    print(f"    Is left clip: {five_prime_clip}, Is right clip: {three_prime_clip}")
-                    print(f"    Is cigar left clip: {cigar_left_clip}, is cigar right clip: {cigar_right_clip}")
-                    clip_seq = query_sequence[query_pos:query_pos + length]
-                    # Adjust clip_seq for reverse reads
-                    if read.is_reverse:
-                        clip_seq = reverse_complement(clip_seq)
-                    # Calculate relative alignment start
-                    if cigar_left_clip:
-                        relative_alignment_start = -length
-                    else:
-                        relative_alignment_start = 0
-                    print(f"    Clip seq : {clip_seq}")
-                    print(f"    Orientation: {'+' if not read.is_reverse else '-'}")
-                    print(f"    Relative alignment start: {relative_alignment_start}")
+            # Insertion or soft clip
+            elif operation in [pysam.CINS, pysam.CSOFT_CLIP]:
+                # Determine if the insertion is at the 5' or 3' end. Allow a
+                # 10bp buffer for the 5' and 3' ends
+                five_prime_clip = ref_pos <= 10
+                three_prime_clip = ref_pos >= ref_len - 10
 
                 # Extract internal soft clips
                 if not five_prime_clip and not three_prime_clip:
-                    clip_seq = query_sequence[query_pos:query_pos + length]
-                    # Adjust clip_seq for reverse reads
-                    if read.is_reverse:
-                        clip_seq = reverse_complement(clip_seq)
-
-                    # Calculate relative alignment start
-                    if cigar_left_clip:
-                        relative_alignment_start = -length
+                    # Check if the query position is at the start of the read
+                    if not read.is_reverse:
+                        # For left soft clips, use the current ref_pos
+                        insertion_positions[ref_pos].append(length)
                     else:
-                        relative_alignment_start = 0
-
-                    soft_clip_data = {
-                        "sequence": clip_seq,
-                        "ref_pos": ref_pos,
-                        "query_pos": query_pos,
-                        "length": length,
-                        "five_prime_clip": five_prime_clip,
-                        "three_prime_clip": three_prime_clip,
-                        "cigar_left_clip": cigar_left_clip,
-                        "cigar_right_clip": cigar_right_clip,
-                        "orientation": "+" if not read.is_reverse else "-",  # Add orientation
-                        "read_name": read.query_name,
-                        "relative_alignment_start": relative_alignment_start
-                    }
-                    soft_clips_by_position[ref_pos].append(soft_clip_data)
-                    # Again, contribute to the *next* reference position
-                    if ref_pos < ref_len:
-                        for base in clip_seq:
-                            base_counts[ref_pos]['S:' + base] = base_counts[ref_pos].get('S:' + base, 0) + 1
+                        # For right soft clips, use the *current* ref_pos
+                        insertion_positions[ref_pos + 1].append(length)
                 query_pos += length
+
+            # Hard clip
             elif operation == pysam.CREF_SKIP:
-                # Reference skip
                 ref_pos += length
-            elif operation == pysam.CHARD_CLIP or operation == pysam.CPAD:
-                # Hard clip or padding - ignore
+
+            # Pad
+            elif operation in [pysam.CHARD_CLIP, pysam.CPAD]:
                 pass
             else:
                 raise ValueError(f"Unexpected CIGAR operation: {operation}")
 
-    # Determine the consensus base at each position
-    consensus_sequence = ""
-    for pos in range(ref_len):
-        # Find the base with the highest count
-        max_base = 'N'
-        max_count = 0
-        for base, count in base_counts[pos].items():
-            if count > max_count:
-                max_base = base
-                max_count = count
-        consensus_sequence += max_base
-
     # Close the BAM file
     sam_file.close()
 
-    # Create pseudo-alignments
-    pseudo_alignments = create_pseudo_alignment(soft_clips_by_position)
-    if debug_allele in ref_name:
-        for pos, (column_alignment, padded_sequences) in pseudo_alignments.items():
-            if pos == 906:
-                print(f"Pseudo-alignments at position {pos}:")
-                print(column_alignment)
-                # print("Padded Sequences:")
-                # for seq in padded_sequences:
-                    # print(seq)
+    # Filter insertions based on minimum coverage
+    consensus_insertions = []
+    for ref_pos, lengths in insertion_positions.items():
 
-    return consensus_sequence
+        # Calculate the total number of reads at this position
+        num_reads = len(lengths)
+
+        # Extract the total number of reads at this position
+        if ref_pos in total_reads_at_position:
+            # Calculate the total number of reads at this position
+            total_reads = total_reads_at_position[ref_pos]
+        else:
+            # If the position is not covered by any reads, set total_reads to 0
+            total_reads = 0
+
+        # Check if the position is covered by enough reads to pass the
+        # minimum coverage threshold
+        if (
+            ref_pos in total_reads_at_position
+            and (num_reads / total_reads) >= min_coverage
+        ):
+
+            # Calculate median length of insertions
+            median_length = int(statistics.median(lengths))
+
+            # Append the reference position and median length to the list
+            consensus_insertions.append((ref_pos, median_length))
+
+    return consensus_insertions
 
 
 def run_command(
