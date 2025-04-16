@@ -1,0 +1,49 @@
+{% set name = "stec_kma_test" %}
+{% set version = "{{ version }}" %}
+
+package:
+  name: '{{ name|lower }}'
+  version: '{{ version }}'
+
+build:
+  number: 0
+  noarch: python
+  script: python -m pip install --no-deps --ignore-installed .
+
+source:
+  url: https://github.com/OLC-Bioinformatics/STEC_KMA/archive/v{{ version }}.tar.gz
+  fn: {{ name }}-{{ version }}.tar.gz
+
+requirements:
+  host:
+    - python=3.12.9=h9e4cc4f_1_cpython
+  run:
+    - bbmap=39.19=he5f24ec_0
+    - biopython=1.85=py312h66e93f0_1
+    - bwa=0.7.19=h577a1d6_0
+    - kma=1.4.18=h577a1d6_0
+    - pysam=0.23.0=py312h47d5410_0
+    - python=3.12.9=h9e4cc4f_1_cpython
+    - samtools=1.21=h96c455f_1
+
+test:
+  imports:
+    - src
+  commands:
+    - stec_kma.py -h
+
+about:
+  home: https://github.com/OLC-Bioinformatics/STEC_KMA
+  license: MIT
+  license_family: MIT
+  license_file: LICENSE
+  summary: 
+  description: |
+    STEC-KMA is a tool for the rapid sub-typing of Shiga toxin-producing E. coli (STEC).
+    It uses a kmer-based approach to identify the presence of specific genes associated with pathogenicity.
+    
+  doc_url: https://github.com/OLC-Bioinformatics/STEC_KMA
+  dev_url: https://github.com/OLC-Bioinformatics/STEC_KMA
+
+extra:
+  recipe-maintainers: 'adamkoziol'
