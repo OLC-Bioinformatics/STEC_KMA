@@ -1,4 +1,4 @@
-{% set name = "stec_kma_test" %}
+{% set name = "stec_kma" %}
 {% set version = "{{ version }}" %}
 
 package:
