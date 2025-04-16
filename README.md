@@ -37,7 +37,7 @@ python src/stec_kma.py -s <sequence_path> -d <database_path> -r <report_path> -t
 
 ### **Arguments**
 - `-s, --sequence_path`: Path to the folder containing sequencing reads (required).
-- `-d, --database_path`: Path to the folder containing the KMA database (required).
+- `-d, --database_path`: **Name and path of the indexed KMA database** (required). This is the value provided to the `-o` argument when running the `kma index` command. **Ensure that the database has been processed with `kma index` before running this tool.**
 - `-r, --report_path`: Path to the folder where reports will be written (optional, defaults to `sequence_path/reports`).
 - `-t, --threads`: Number of threads to use (default: number of CPU cores).
 - `-ID, --identity`: Minimum identity percentage for KMA hits (default: 90%).
@@ -97,14 +97,19 @@ The tool generates the following outputs:
 3. **Intermediate Files**:
    - Baited reads, mapped reads, and alignment files for further analysis.
 
-
 ---
 
 ## **Example**
+Before running `stec_kma.py`, ensure that `kma index` has been run on your database. For example:
+```bash
+kma index -i /path/to/allele_db.fasta -o /path/to/indexed_db
+```
+
+Then, run the tool:
 ```bash
 python src/stec_kma.py \
     -s /path/to/sequence_data \
-    -d /path/to/kma_database \
+    -d /path/to/indexed_db \
     -r /path/to/output_reports \
     -t 8 \
     -ID 95 \
