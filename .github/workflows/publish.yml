@@ -11,7 +11,7 @@ jobs:
       CONDA_PKG_PATH: /usr/share/miniconda/conda-bld/noarch
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
     - name: Setup Conda
       uses: conda-incubator/setup-miniconda@v2
       with:
