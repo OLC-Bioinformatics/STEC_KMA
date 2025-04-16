@@ -1,4 +1,4 @@
-name: Build, Publish and Release PyPI and Conda Packages
+name: Build, Publish and Release Conda Packages
 
 on:
   release:
