@@ -36,7 +36,7 @@ jobs:
       run: |
         conda build .
     - name: Upload Conda package
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: stec_kma
         path: $CONDA_PKG_PATH/stec_kma-*.tar.bz2
