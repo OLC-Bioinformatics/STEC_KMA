@@ -3,3 +3,4 @@ ref/
 environment.yml
 *.egg-info/
 *__pycache__/
+.coverage
