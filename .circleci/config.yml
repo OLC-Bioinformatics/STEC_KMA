@@ -34,8 +34,8 @@ jobs:
             conda install mamba -c conda-forge
             
             # Make the script executable and run it
-            chmod +x generate_env.sh
-            ./generate_env.sh
+            chmod +x generate_conda_environment.sh
+            ./generate_conda_environment.sh
             
             # Create and activate environment using the generated file
             mamba env create -f environment.yml
@@ -65,7 +65,7 @@ jobs:
           destination: circleci-docs
       # Upload the coverage report to codecov
       - codecov/upload:
-          file: /root/project/test_reports/stec_kma.xml
+          files: /root/project/test_reports/stec_kma.xml
 
 # Define a workflow that runs the defined job
 workflows:
