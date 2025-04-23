@@ -13,20 +13,21 @@ echo "Generating environment file from recipe..."
 cat > $ENV_FILE << EOL
 name: stec_kma
 channels:
-    - conda-forge
-    - bioconda
-    - defaults
+  - conda-forge
+  - bioconda
+  - defaults
 dependencies:
 EOL
 
 # Extract run dependencies from meta.yaml and append to environment.yml
-grep -A 20 "run:" $META_YAML | grep -v "run:" | sed 's/^ *- //g' | grep -v "^$" | grep -v "^#" >> $ENV_FILE
+# This more specific grep/sed pattern extracts just the dependencies
+grep -A 20 "run:" $META_YAML | grep -v "run:" | grep "=" | sed 's/^ *- /  - /g' | grep -v "^$" | grep -v "test:" -B 100 >> $ENV_FILE
 
 # Add pip and the development package itself
 cat >> $ENV_FILE << EOL
-    - pip
-    - pip:
-        - -e .
+  - pip
+  - pip:
+    - -e .
 EOL
 
 echo "Environment file generated successfully:"
