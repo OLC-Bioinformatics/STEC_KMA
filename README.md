@@ -1,5 +1,13 @@
 # **STEC_KMA**
 
+[![CircleCI](https://dl.circleci.com/status-badge/img/gh/OLC-Bioinformatics/STEC_KMA/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/OLC-Bioinformatics/STEC_KMA/tree/main)
+[![codecov](https://codecov.io/gh/OLC-Bioinformatics/STEC_KMA/graph/badge.svg?token=EZWA724UQC)](https://codecov.io/gh/OLC-Bioinformatics/STEC_KMA)
+[![Anaconda-Server Badge](https://img.shields.io/badge/install%20with-conda-brightgreen)](https://anaconda.org/olcbioinformatics/stec_kma)
+[![GitHub Release](https://img.shields.io/github/v/release/OLC-Bioinformatics/STEC_KMA?display_name=release&label=version&color=%20dark%20green
+)](https://github.com/OLC-Bioinformatics/STEC_KMA/releases)
+[![GitHub issues](https://img.shields.io/github/issues/OLC-Bioinformatics/STEC_KMA)](https://github.com/OLC-LOC-Bioinformatics/STEC_KMA/issues)
+[![license](https://img.shields.io/badge/license-MIT-brightgreen)](https://github.com/OLC-Bioinformatics/STEC_KMA/blob/main/LICENSE)
+
 `STEC_KMA` is a bioinformatics tool designed to process sequencing data for Shiga toxin-producing *Escherichia coli* (STEC). It uses the **KMA** (K-mer Alignment) algorithm to map sequencing reads to a combined allele database, identify the best hits, extract relevant reads, and confirm results through alignment using **BWA** (Burrows-Wheeler Aligner). The tool also identifies alleles with insertions and generates comprehensive reports.
 
 ---
