@@ -29,6 +29,7 @@ from src.methods import (
     _parse_allele_reports,
     _reverse_bait_targets_bbmap,
     _setup_logging,
+    _tilde_expand,
     _write_novel_allele_sequences,
     _write_read_names_file,
     _write_report,
@@ -221,40 +222,12 @@ def cli():
     return arguments
 
 
-def tilde_expand(*, path: str) -> str:
-    """
-    Expand the tilde (~) in the supplied path to the full user directory path.
-
-    :param path: The path that may contain a tilde
-    :return: The expanded absolute path
-
-    Example usage:
-    >>> expanded_path = tilde_expand('~/my_dir')
-    >>> print(expanded_path)  # Output: '/home/user/my_dir'
-    """
-    # Check if the path starts with a tilde (~)
-    if path.startswith('~'):
-        # Expand the tilde to the full user directory path
-        return_path = os.path.abspath(
-            os.path.expanduser(
-                os.path.join(path)
-            )
-        )
-    else:
-        # Return the absolute path if no tilde is present
-        return_path = os.path.abspath(
-            os.path.join(path)
-        )
-
-    return return_path
-
-
 if __name__ == '__main__':
     args = cli()
 
     # Expand the tilde in the paths
-    args.sequence_path = tilde_expand(path=args.sequence_path)
-    args.database_path = tilde_expand(path=args.database_path)
+    args.sequence_path = _tilde_expand(path=args.sequence_path)
+    args.database_path = _tilde_expand(path=args.database_path)
 
     # Set the report path to the sequence path if not provided
     if args.report_path is None:
@@ -263,7 +236,7 @@ if __name__ == '__main__':
             'reports'
         )
     else:
-        args.report_path = tilde_expand(path=args.report_path)
+        args.report_path = _tilde_expand(path=args.report_path)
 
     # Create the report path if it does not exist
     os.makedirs(args.report_path, exist_ok=True)
