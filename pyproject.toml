@@ -1,0 +1,14 @@
+[tool.coverage.run]
+source = ["src/"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "pass",
+    "raise NotImplementedError",
+]
+
+[tool.coverage.exclude]
+"src/stec_kma.py" = ["226-244"]
