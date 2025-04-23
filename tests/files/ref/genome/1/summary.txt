@@ -1,0 +1,13 @@
+#Summary
+#Generated on	Wed Apr 23 15:15:39 UTC 2025
+#Version	5
+chroms	1
+bases	410882
+defined	389382
+undefined	21500
+contigs	12
+scaffolds	12
+interpad	500
+source	/PyCharmProjects/STEC_KMA/tests/files/2000-SEQ-0000_negative.fasta
+bytes	389632
+last modified	1745418958234
