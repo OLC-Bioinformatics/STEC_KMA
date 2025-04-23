@@ -1,5 +1,5 @@
 seq*/
 ref/
-
+environment.yml
 *.egg-info/
 *__pycache__/
