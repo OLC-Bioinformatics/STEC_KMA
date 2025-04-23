@@ -71,9 +71,11 @@ def _find_samples(
     for fastq_file in sorted(fastq_files):
         # Extract sample name from the fastq file name
         file_name = os.path.basename(fastq_file)
+        print(file_name)
 
         # Find the sample name using regex
         match = re.search(r"(\d{4}-[A-Za-z]{3,5}-\d{4})", file_name)
+
         if match:
             sample_name = match.group(1)
         else:
@@ -584,6 +586,9 @@ def _write_read_names_file(
                 gene
             )
 
+            # Ensure the output directory exists
+            os.makedirs(sequence_dict['gene_output_dir'][gene], exist_ok=True)
+
             # Update the sample dictionary
             if gene not in sequence_dict['mapped_read_files']:
                 sequence_dict['mapped_read_files'][gene] = {}
@@ -975,6 +980,7 @@ def _find_consensus_internal_insertions_and_sequence(
     base_counts = defaultdict(lambda: defaultdict(int))
 
     for read in sam_file.fetch(ref_name, 0, ref_len):
+
         query_sequence = read.query_sequence
 
         # Extract CIGAR operations
@@ -1001,6 +1007,7 @@ def _find_consensus_internal_insertions_and_sequence(
 
             # Insertion or soft clip
             elif operation in [pysam.CINS, pysam.CSOFT_CLIP]:
+
                 # Determine if the insertion is at the 5' or 3' end. Allow a
                 # 10bp buffer for the 5' and 3' ends
                 five_prime_clip = ref_pos <= 10
@@ -1029,18 +1036,14 @@ def _find_consensus_internal_insertions_and_sequence(
 
     # Filter insertions based on minimum coverage
     consensus_insertions = []
+
     for ref_pos, lengths in sorted(insertion_positions.items()):
 
         # Calculate the total number of reads at this position
         num_reads = len(lengths)
 
         # Extract the total number of reads at this position
-        if ref_pos in total_reads_at_position:
-            # Calculate the total number of reads at this position
-            total_reads = total_reads_at_position[ref_pos]
-        else:
-            # If the position is not covered by any reads, set total_reads to 0
-            total_reads = 0
+        total_reads = total_reads_at_position[ref_pos]
 
         # Check if the position is covered by enough reads to pass the
         # minimum coverage threshold
@@ -1160,7 +1163,7 @@ def _detect_truncated_sequences(
         return f'Truncated: {len(protein_sequence)}'
 
     # Check for stop codons prior to the min length
-    for i in range(0, min_length + 1):
+    for i in range(0, min(len(protein_sequence), min_length)):
         if protein_sequence[i] == '*':
             return f'Internal stop codon at position: {i + 1}'
 
@@ -1417,3 +1420,31 @@ def run_command(
     except subprocess.CalledProcessError as exc:
         logging.error("Command failed: %s",  exc)
         raise
+
+
+def _tilde_expand(*, path: str) -> str:
+    """
+    Expand the tilde (~) in the supplied path to the full user directory path.
+
+    :param path: The path that may contain a tilde
+    :return: The expanded absolute path
+
+    Example usage:
+    >>> expanded_path = tilde_expand('~/my_dir')
+    >>> print(expanded_path)  # Output: '/home/user/my_dir'
+    """
+    # Check if the path starts with a tilde (~)
+    if path.startswith('~'):
+        # Expand the tilde to the full user directory path
+        return_path = os.path.abspath(
+            os.path.expanduser(
+                os.path.join(path)
+            )
+        )
+    else:
+        # Return the absolute path if no tilde is present
+        return_path = os.path.abspath(
+            os.path.join(path)
+        )
+
+    return return_path
