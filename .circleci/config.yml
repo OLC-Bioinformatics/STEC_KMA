@@ -1,0 +1,78 @@
+# Use the latest 2.1 version of CircleCI pipeline process engine.
+version: 2.1
+
+# Create the orb for the code coverage upload
+orbs:
+  codecov: codecov/codecov@5.3.0
+
+# Define a job to be invoked later in a workflow.
+jobs:
+  stec_kma:
+    # Specify the execution environment. Using miniconda3 image from Dockerhub.
+    docker:
+      - image: continuumio/miniconda3
+    # Add steps to the job
+    steps:
+      # Checkout the code from the repository
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-conda-{{ checksum "recipes/meta.yaml" }}
+            - v1-conda-
+      - run:
+          name: Setup Environment
+          command: |
+            # Install system dependencies
+            apt-get update && apt-get install -y curl gnupg
+            
+            # Add necessary channels for conda
+            conda config --add channels conda-forge
+            conda config --add channels bioconda
+            conda config --set always_yes yes --set changeps1 no
+            
+            # Install mamba for faster package resolution
+            conda install mamba -c conda-forge
+            
+            # Make the script executable and run it
+            chmod +x generate_env.sh
+            ./generate_env.sh
+            
+            # Create and activate environment using the generated file
+            mamba env create -f environment.yml
+            source activate stec_kma
+      - save_cache:
+          paths:
+            - /opt/conda/pkgs
+          key: v1-conda-{{ checksum "recipes/meta.yaml" }}
+      - run:
+          name: Run Tests
+          command: |
+            source activate stec_kma
+            # Create the test reports directory
+            mkdir -p test_reports
+            # Run pytest with coverage options
+            python -m pytest tests/ --cov=src/ --cov-report=xml:test_reports/stec_kma.xml -s
+      - run:
+          name: Check Test Reports
+          command: |
+            if [ ! -f /root/project/test_reports/stec_kma.xml ]; then
+              echo "Test reports not found!"
+              exit 1
+            fi
+      # Store the test reports as artifacts
+      - store_artifacts:
+          path: test_reports/
+          destination: circleci-docs
+      # Upload the coverage report to codecov
+      - codecov/upload:
+          file: /root/project/test_reports/stec_kma.xml
+
+# Define a workflow that runs the defined job
+workflows:
+  build_and_test:
+    jobs:
+      - stec_kma:
+          filters:
+            branches:
+              # Ignore the gh-pages branch
+              ignore: gh-pages
