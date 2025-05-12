@@ -22,6 +22,8 @@ from src.methods import (
     _extract_consensus_insertions_and_sequence,
     _extract_kma_mapped_reads,
     _extract_reads_by_name,
+    _find_best_hits,
+    _find_duplicate_alleles,
     _find_samples,
     _index_baited_sequences,
     _map_allele_sequences_kma,
@@ -129,6 +131,16 @@ def main(
         sample_dict=sample_dict
         )
 
+    logging.info('Determining the best hits')
+    sample_dict = _find_best_hits(
+        sample_dict=sample_dict
+    )
+
+    logging.info('Identifying genes with multiple best alleles')
+    sample_dict = _find_duplicate_alleles(
+        sample_dict=sample_dict
+    )
+
     logging.info('Writing novel allele sequences to FASTA files')
     _write_novel_allele_sequences(
         sample_dict=sample_dict,
@@ -152,6 +164,26 @@ def main(
         'STEC calculation completed in %.2f seconds (%.2f minutes)',
         elapsed_time, elapsed_time / 60
     )
+
+
+def restricted_float(x: str) -> float:
+    """
+    Restrict the float to be between 0 and 1
+
+    Args:
+        x: The string to convert to a float
+
+    Returns:
+        The float value of the string
+    """
+    try:
+        x = float(x)
+    except ValueError as exc:
+        raise ValueError(f'{x} is not a valid float') from exc
+    # Check if the float is between 0 and 1
+    if x < 0 or x > 1:
+        raise ValueError(f'{x} is not between 0 and 1')
+    return x
 
 
 def cli():
@@ -199,6 +231,7 @@ def cli():
     parser.add_argument(
         '-c', '--min_coverage',
         default=0.7,
+        type=restricted_float,
         help='Minimum fraction of reads required to call a consensus '
         'insertion. For example, 0.7 means the insertion must be present in '
         'at least 70%%  of the reads covering that position. '
