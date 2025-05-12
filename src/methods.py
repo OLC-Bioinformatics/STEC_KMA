@@ -21,6 +21,8 @@ from typing import (
 )
 
 # Third-party imports
+from Bio.Data import CodonTable
+from Bio import pairwise2
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -71,7 +73,7 @@ def _find_samples(
     for fastq_file in sorted(fastq_files):
         # Extract sample name from the fastq file name
         file_name = os.path.basename(fastq_file)
-        print(file_name)
+        logging.debug(file_name)
 
         # Find the sample name using regex
         match = re.search(r"(\d{4}-[A-Za-z]{3,5}-\d{4})", file_name)
@@ -370,27 +372,21 @@ def _parse_allele_reports(
                     reference, _, _, _, t_identity, \
                         _, _, _, _, _, _ = line.strip().split('\t')
 
-                    # Extract the gene name from the report file
-                    gene_name = _find_gene_name(allele=reference)
+                    # Initialise the dictionaries for the allele
+                    if reference not in best_hits:
+                        best_hits[reference] = {}
+                    if reference not in best_scores:
+                        best_scores[reference] = 0
+                    if reference not in best_hit_files:
+                        best_hit_files[reference] = ''
 
-                    # Initialise the dictionaries for the gene
-                    if gene_name not in best_hits:
-                        best_hits[gene_name] = {}
-                    if gene_name not in best_scores:
-                        best_scores[gene_name] = 0
-                    if gene_name not in best_hit_files:
-                        best_hit_files[gene_name] = ''
-
-                    # Update the best hit if the score is higher
-                    if float(t_identity) > float(best_scores[gene_name]):
-                        best_hits[gene_name] = reference
-                        best_scores[gene_name] = float(t_identity)
-                        best_hit_files[gene_name] = report_file
+                    # Update the best hits and scores
+                    best_scores[reference] = float(t_identity)
+                    best_hit_files[reference] = report_file
                 except ValueError:
                     pass
 
         # Update the sample dictionary
-        sequence_dict['best_hits'] = best_hits
         sequence_dict['best_scores'] = best_scores
         sequence_dict['best_hit_files'] = best_hit_files
 
@@ -420,7 +416,7 @@ def _extract_allele_sequence(
         dict: The updated sample dictionary
     """
 
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
@@ -437,8 +433,8 @@ def _extract_allele_sequence(
             # Extract the allele name from the record
             allele_name = record.id
 
-            # Check if the allele name is in the best hits
-            if allele_name in sequence_dict['best_hits'].values():
+            # Check if the allele name is in the best scores
+            if allele_name in sequence_dict['best_scores']:
 
                 # Write the allele sequence to a FASTA file
                 output_file = _write_allele_sequences(
@@ -449,6 +445,11 @@ def _extract_allele_sequence(
 
         # Update the sample dictionary
         sequence_dict['allele_sequences'] = allele_sequences
+
+        for allele, location in sequence_dict['allele_sequences'].items():
+            logging.debug(
+                '%s Allele %s: Location %s', sample, allele, location
+            )
 
     return sample_dict
 
@@ -467,21 +468,19 @@ def _write_allele_sequences(
     Returns:
         str: The path to the output file
     """
-    # Extract the gene name from the allele name
-    gene_name = _find_gene_name(allele=record.id)
+
+    # Ensure that the allele name does not contain any special characters or
+    # punctuation
+    allele_name = _rename_allele_for_folder(allele=record.id)
 
     # Set the name of the output directory
     output_dir = os.path.join(
         sequence_dict['output_path'],
-        gene_name
+        allele_name
     )
 
     # Create the output directory if it does not exist
     os.makedirs(output_dir, exist_ok=True)
-
-    # Ensure that the allele name does not contain any special characters or
-    # punctuation
-    allele_name = re.sub(r'[^a-zA-Z0-9_]', '_', record.id)
 
     # Create the output file path
     output_file = os.path.join(
@@ -493,6 +492,23 @@ def _write_allele_sequences(
     SeqIO.write(record, output_file, 'fasta')
 
     return output_file
+
+
+def _rename_allele_for_folder(
+    *,  # Enforce keyword arguments
+    allele: str
+) -> str:
+    """
+    Rename the allele for the output folder
+
+    Args:
+        allele: The allele name
+
+    Returns:
+        str: The renamed allele
+    """
+    # Remove the extension from the allele name
+    return re.sub(r'[^a-zA-Z0-9_]', '_', allele)
 
 
 def _extract_kma_mapped_reads(
@@ -508,7 +524,7 @@ def _extract_kma_mapped_reads(
     Returns:
         dict: The updated sample dictionary
     """
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
@@ -535,20 +551,23 @@ def _extract_kma_mapped_reads(
                 read_name = info[-1]
 
                 # Check if the allele is in the best hits
-                if allele in sequence_dict['best_hits'].values():
-                    gene = _find_gene_name(allele=allele)
+                if allele in sequence_dict['best_scores']:
 
                     # Update the sample dictionary
-                    if gene not in sequence_dict['mapped_reads']:
-                        sequence_dict['mapped_reads'][gene] = {}
-
-                    if allele not in sequence_dict['mapped_reads'][gene]:
-                        sequence_dict['mapped_reads'][gene][allele] = []
+                    if allele not in sequence_dict['mapped_reads']:
+                        sequence_dict['mapped_reads'][allele] = []
 
                     # Append the read name to the list
-                    sequence_dict['mapped_reads'][gene][allele].append(
+                    sequence_dict['mapped_reads'][allele].append(
                         read_name
                     )
+
+        # Log the number of mapped reads
+        for allele, read_list in sequence_dict['mapped_reads'].items():
+            logging.debug(
+                '%s Allele %s: %d mapped reads',
+                sample, allele, len(read_list)
+            )
 
     return sample_dict
 
@@ -566,7 +585,7 @@ def _write_read_names_file(
     Returns:
         dict: The updated sample dictionary
     """
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
@@ -578,36 +597,45 @@ def _write_read_names_file(
         # Create a dictionary to store the output directories
         sequence_dict['gene_output_dir'] = {}
 
-        for gene, allele_dict in sequence_dict['mapped_reads'].items():
+        for allele, read_list in sequence_dict['mapped_reads'].items():
+
+            # Rename the allele for the output folder
+            allele_name = _rename_allele_for_folder(allele=allele)
 
             # Set the name of the output directory
-            sequence_dict['gene_output_dir'][gene] = os.path.join(
+            sequence_dict['gene_output_dir'][allele] = os.path.join(
                 sequence_dict['output_path'],
-                gene
+                allele_name
             )
 
             # Ensure the output directory exists
-            os.makedirs(sequence_dict['gene_output_dir'][gene], exist_ok=True)
+            os.makedirs(
+                sequence_dict['gene_output_dir'][allele], exist_ok=True
+            )
 
             # Update the sample dictionary
-            if gene not in sequence_dict['mapped_read_files']:
-                sequence_dict['mapped_read_files'][gene] = {}
+            if allele not in sequence_dict['mapped_read_files']:
+                sequence_dict['mapped_read_files'][allele] = {}
 
-            for allele, read_list in allele_dict.items():
+            # Set the name of the output file
+            output_file = os.path.join(
+                sequence_dict['gene_output_dir'][allele],
+                f'{allele}.names'
+            )
 
-                # Set the name of the output file
-                output_file = os.path.join(
-                    sequence_dict['gene_output_dir'][gene],
-                    f'{gene}_{allele}.names'
-                )
+            # Write the read names to the output file
+            with open(output_file, 'w', encoding='utf-8') as out_fh:
+                for read_name in read_list:
+                    out_fh.write(f'{read_name}\n')
 
-                # Write the read names to the output file
-                with open(output_file, 'w', encoding='utf-8') as out_fh:
-                    for read_name in read_list:
-                        out_fh.write(f'{read_name}\n')
+            # Update the sample dictionary
+            sequence_dict['mapped_read_files'][allele] = output_file
 
-                # Update the sample dictionary
-                sequence_dict['mapped_read_files'][gene][allele] = output_file
+        # Log the output files
+        for allele, read_file in sequence_dict['mapped_read_files'].items():
+            logging.debug(
+                '%s Allele %s: read file %s', sample, allele, read_file
+            )
 
     return sample_dict
 
@@ -625,7 +653,7 @@ def _extract_reads_by_name(
     Returns:
         dict: The updated sample dictionary
     """
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
@@ -637,45 +665,46 @@ def _extract_reads_by_name(
         # Create a dictionary to store the extracted reads
         extracted_reads = {}
 
-        for gene, allele_dict in sequence_dict['mapped_reads'].items():
+        for allele, read_file in sequence_dict['mapped_read_files'].items():
 
             # Update the extracted reads dictionary
-            if gene not in extracted_reads:
-                extracted_reads[gene] = {}
+            if allele not in extracted_reads:
+                extracted_reads[allele] = {}
 
-            for allele in allele_dict:
+            # Set the name of the output file
+            output_file = os.path.join(
+                sequence_dict['gene_output_dir'][allele],
+                f'{allele}.fastq.gz'
+            )
 
-                # Extract the read names file
-                read_file = sequence_dict['mapped_read_files'][gene][allele]
+            # Update the sample dictionary
+            extracted_reads[allele] = output_file
 
-                # Set the name of the output file
-                output_file = os.path.join(
-                    sequence_dict['gene_output_dir'][gene],
-                    f'{gene}_{allele}.fastq.gz'
+            # Construct the filterbyname command
+            filterbyname_cmd = (
+                f'filterbyname.sh in={baited_reads} '
+                f'out={output_file} '
+                f'include=t names={read_file}'
+            )
+
+            logging.debug('Filterbyname command: %s', filterbyname_cmd)
+
+            # Run the command if the output does not already exist
+            if not os.path.exists(output_file):
+                output = run_command(
+                    command=filterbyname_cmd,
+                    split=False
                 )
-
-                # Update the sample dictionary
-                extracted_reads[gene][allele] = output_file
-
-                # Construct the filterbyname command
-                filterbyname_cmd = (
-                    f'filterbyname.sh in={baited_reads} '
-                    f'out={output_file} '
-                    f'include=t names={read_file}'
-                )
-
-                logging.debug('Filterbyname command: %s', filterbyname_cmd)
-
-                # Run the command if the output does not already exist
-                if not os.path.exists(output_file):
-                    output = run_command(
-                        command=filterbyname_cmd,
-                        split=False
-                    )
-                    logging.debug('Filterbyname output: %s', output.stdout)
+                logging.debug('Filterbyname output: %s', output.stdout)
 
         # Update the sample dictionary
         sequence_dict['extracted_reads'] = extracted_reads
+
+        # Log the extracted reads
+        for allele, read_file in sequence_dict['extracted_reads'].items():
+            logging.debug(
+                '%s Allele %s: extracted reads %s', sample, allele, read_file
+            )
 
     return sample_dict
 
@@ -711,7 +740,7 @@ def _map_reads_bwa(
     Returns:
         dict: The updated sample dictionary
     """
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
@@ -720,105 +749,109 @@ def _map_reads_bwa(
         # Initialise a dictionary to store the BWA output
         sequence_dict['bwa_output'] = {}
 
-        for __, allele_dict in sequence_dict['extracted_reads'].items():
+        for allele, allele_db in sequence_dict['allele_sequences'].items():
 
-            for allele in allele_dict:
+            # Extract the parent directory of the reference allele
+            reference_allele_dir = sequence_dict['gene_output_dir'][allele]
 
-                # Extract the extracted reads database
-                allele_db = sequence_dict['allele_sequences'][allele]
+            # Index the reference allele if it was not already done
+            if not os.path.exists(allele_db + '.bwt'):
+                _index_reference_allele(reference_allele=allele_db)
 
-                # Extract the gene name from the allele name
-                gene = _find_gene_name(allele=allele)
+            # Set the name of the output file
+            output_bam = os.path.join(
+                reference_allele_dir,
+                f'{allele}.bam'
+            )
 
-                # Extract the parent directory of the reference allele
-                reference_allele_dir = sequence_dict['gene_output_dir'][gene]
+            # Update the sample dictionaries
+            sequence_dict['bwa_output'][allele] = output_bam
 
-                # Index the reference allele if it was not already done
-                if not os.path.exists(allele_db + '.bwt'):
-                    _index_reference_allele(reference_allele=allele_db)
+            bwa_cmd = [
+                'bwa', 'mem',
+                '-B', '50',      # Mismatch penalty (default 4)
+                # '-O', '6,6',    # Gap open penalty (default 6,6)
+                # '-E', '1,1',    # Gap extension penalty (default 1,1)
+                # '-L', '8,8',    # Clipping penalty (default 5,5)
+                # '-T', '30',     # Minimum score to output (default 30)
+                '-t', str(threads),
+                allele_db,
+                sequence_dict['baited_reads']
+            ]
 
-                # Set the name of the output file
-                output_bam = os.path.join(
-                    reference_allele_dir,
-                    f'{allele}.bam'
-                )
+            # Construct Samtools view command
+            samtools_view_cmd = ['samtools', 'view', '-Sb', '-']
 
-                # Update the sample dictionaries
-                sequence_dict['bwa_output'][allele] = output_bam
+            # Construct Samtools sort command
+            samtools_sort_cmd = ['samtools', 'sort', '-o', output_bam]
 
-                # Construct BWA command
-                bwa_cmd = [
-                    'bwa', 'mem', '-t', str(threads), allele_db,
-                    sequence_dict['baited_reads']
-                ]
+            logging.debug('BWA command: %s', ' '.join(bwa_cmd))
+            logging.debug(
+                'Samtools view command: %s', ' '.join(samtools_view_cmd)
+            )
+            logging.debug(
+                'Samtools sort command: %s', ' '.join(samtools_sort_cmd)
+            )
 
-                # Construct Samtools view command
-                samtools_view_cmd = ['samtools', 'view', '-Sb', '-']
+            # Run the command if the output does not already exist
+            if not os.path.exists(output_bam):
+                try:
+                    # Execute BWA
+                    bwa_process = subprocess.Popen(
+                        bwa_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
 
-                # Construct Samtools sort command
-                samtools_sort_cmd = ['samtools', 'sort', '-o', output_bam]
+                    # Execute Samtools view
+                    samtools_view_process = subprocess.Popen(
+                        samtools_view_cmd,
+                        stdin=bwa_process.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    bwa_process.stdout.close()  # Allow BWA to exit
 
-                logging.debug('BWA command: %s', ' '.join(bwa_cmd))
-                logging.debug(
-                    'Samtools view command: %s', ' '.join(samtools_view_cmd)
-                )
-                logging.debug(
-                    'Samtools sort command: %s', ' '.join(samtools_sort_cmd)
-                )
+                    # Execute Samtools sort
+                    samtools_sort_process = subprocess.Popen(
+                        samtools_sort_cmd,
+                        stdin=samtools_view_process.stdout,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    # Allow samtools view to exit
+                    samtools_view_process.stdout.close()
 
-                # Run the command if the output does not already exist
-                if not os.path.exists(output_bam):
-                    try:
-                        # Execute BWA
-                        bwa_process = subprocess.Popen(
-                            bwa_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE
-                        )
+                    # Get the output and error messages
+                    _, stderr = samtools_sort_process.communicate()
 
-                        # Execute Samtools view
-                        samtools_view_process = subprocess.Popen(
-                            samtools_view_cmd,
-                            stdin=bwa_process.stdout,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE
-                        )
-                        bwa_process.stdout.close()  # Allow BWA to exit
-
-                        # Execute Samtools sort
-                        samtools_sort_process = subprocess.Popen(
-                            samtools_sort_cmd,
-                            stdin=samtools_view_process.stdout,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE
-                        )
-                        # Allow samtools view to exit
-                        samtools_view_process.stdout.close()
-
-                        # Get the output and error messages
-                        _, stderr = samtools_sort_process.communicate()
-
-                        if stderr:
-                            logging.error(
-                                "Error: %s", stderr.decode()
-                            )
-                        else:
-                            logging.debug(
-                                'BWA/Samtools pipeline completed successfully'
-                            )
-
-                        # Index the BAM file
-                        _index_bam_file(bam_file=output_bam)
-
-                    except FileNotFoundError as exc:
+                    if stderr:
                         logging.error(
-                            "Error: One of the required files not found: %s",
-                            exc
+                            "Error: %s", stderr.decode()
                         )
-                        raise SystemExit from exc
-                    except Exception as exc:
-                        logging.error("An error occurred: %s", exc)
-                        raise SystemExit from exc
+                    else:
+                        logging.debug(
+                            'BWA/Samtools pipeline completed successfully'
+                        )
+
+                    # Index the BAM file
+                    _index_bam_file(bam_file=output_bam)
+
+                except FileNotFoundError as exc:
+                    logging.error(
+                        "Error: One of the required files not found: %s",
+                        exc
+                    )
+                    raise SystemExit from exc
+                except Exception as exc:
+                    logging.error("An error occurred: %s", exc)
+                    raise SystemExit from exc
+
+        # Log the BWA output files
+        for allele, bam_file in sequence_dict['bwa_output'].items():
+            logging.debug(
+                '%s Allele %s: BWA output %s', sample, allele, bam_file
+            )
 
     return sample_dict
 
@@ -898,24 +931,29 @@ def _extract_consensus_insertions_and_sequence(
     Returns:
         dict: The updated sample dictionary
     """
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
             continue
 
-        # Initialise a dictionary to store outputs
+        # Initialise dictionaries to store outputs
         sequence_dict['insertions'] = {}
         sequence_dict['consensus'] = {}
         sequence_dict['aa_sequence'] = {}
         sequence_dict['aa_sequence_qa'] = {}
+        sequence_dict['percent_identity'] = {}
 
         for allele, bam_file in sequence_dict['bwa_output'].items():
 
+            # Extract the reference allele file path
+            reference_allele_path = sequence_dict['allele_sequences'][allele]
+
             # Calculate the consensus internal insertions
-            insertions, consensus_sequence = \
+            insertions, consensus_sequence, percent_identity = \
                 _find_consensus_internal_insertions_and_sequence(
                     bam_file=bam_file,
+                    reference_file=reference_allele_path,
                     min_coverage=min_coverage,
                 )
 
@@ -934,12 +972,21 @@ def _extract_consensus_insertions_and_sequence(
             sequence_dict['consensus'][allele] = consensus_sequence
             sequence_dict['aa_sequence'][allele] = aa_sequence
             sequence_dict['aa_sequence_qa'][allele] = aa_sequence_qa
+            sequence_dict['percent_identity'][allele] = percent_identity
+
+        # Log the consensus sequence
+        for allele, percent_id in sequence_dict['percent_identity'].items():
+            logging.debug(
+                '%s Allele %s: percent identity %s',
+                sample, allele, percent_id
+            )
 
     return sample_dict
 
 
 def _find_consensus_internal_insertions_and_sequence(
     bam_file: str,
+    reference_file: str,
     min_coverage: float = 0.5,
 ) -> tuple[list[tuple[int, int]], str]:
     """
@@ -949,6 +996,7 @@ def _find_consensus_internal_insertions_and_sequence(
     Args:
         bam_file: Path to the sorted BAM file.
         min_coverage: Minimum *fraction* of reads required to call a consensus
+        reference file: Path to the reference FASTA file.
         insertion. For example, 0.5 means the insertion must be present in at
         least 50% of reads covering that position.
 
@@ -1074,7 +1122,24 @@ def _find_consensus_internal_insertions_and_sequence(
     # Join the consensus sequence into a string
     consensus_sequence = ''.join(consensus_sequence)
 
-    return consensus_insertions, consensus_sequence
+    # Load the reference sequence
+    ref_record = next(SeqIO.parse(reference_file, "fasta"))
+    reference_sequence = str(ref_record.seq)
+
+    # Calculate percent identity using global alignment
+    alignments = pairwise2.align.globalxx(
+        consensus_sequence, reference_sequence
+    )
+    best_alignment = alignments[0]
+    matches = best_alignment[2]
+
+    # Calculate the percent identity
+    percent_identity = matches / len(reference_sequence) * 100
+
+    # Trim the percent identity to 2 decimal places
+    percent_identity = round(percent_identity, 2)
+
+    return consensus_insertions, consensus_sequence, percent_identity
 
 
 def _calculate_depth_per_position(
@@ -1120,7 +1185,7 @@ def _translate_allele_sequence(
     nt_sequence: str
 ) -> str:
     """
-    Translate the allele sequence to protein.
+    Translate the allele sequence to protein, replacing invalid codons with 'X'.
 
     Args:
         nt_sequence: Nucleotide sequence of the allele.
@@ -1131,16 +1196,25 @@ def _translate_allele_sequence(
     # Ensure the sequence length is a multiple of three
     remainder = len(nt_sequence) % 3
     if remainder != 0:
-        # Pad with trailing 'N' to make the length a multiple of three
         nt_sequence += 'N' * (3 - remainder)
 
-    # Create a Seq object from the nucleotide sequence
-    seq = Seq(nt_sequence)
-
-    # Translate the sequence to protein
-    protein_sequence = seq.translate()
-
-    return str(protein_sequence)
+    # Use the standard codon table
+    table = CodonTable.unambiguous_dna_by_name["Standard"]
+    protein = []
+    seq = nt_sequence.upper()
+    for i in range(0, len(seq), 3):
+        codon = seq[i:i+3]
+        if "N" in codon or "-" in codon or len(codon) < 3:
+            protein.append("X")
+            continue
+        try:
+            protein.append(table.forward_table[codon])
+        except KeyError:
+            if codon in table.stop_codons:
+                protein.append("*")
+            else:
+                protein.append("X")
+    return "".join(protein)
 
 
 def _detect_truncated_sequences(
@@ -1190,10 +1264,7 @@ def _write_novel_allele_sequences(
             continue
 
         # Extract the allele identities
-        for gene, identity in sequence_dict['best_scores'].items():
-
-            # Extract the best hit allele
-            allele = sequence_dict['best_hits'][gene]
+        for allele, identity in sequence_dict['percent_identity'].items():
 
             # Check if the identity is less than 100%
             if identity == 100 or identity < 90:
@@ -1251,37 +1322,183 @@ def _calculate_stx_profile(
         dict: The updated sample dictionary
     """
 
-    for _, sequence_dict in sample_dict.items():
+    for sample, sequence_dict in sample_dict.items():
 
         # Ensure that the sample has a KMA database
         if sequence_dict['kma_sample_db'] is None:
             continue
 
         # Create a dictionary to store the stx profiles
-        stx_profiles = {}
+        stx_profiles = []
 
         # Extract the best hits
-        best_hits = sequence_dict['best_hits']
+        for allele, percent_id in sequence_dict['percent_identity'].items():
 
-        # Iterate through the best hits
-        for gene, allele in best_hits.items():
-
-            # Extract the best score
-            best_score = sequence_dict['best_scores'][gene]
+            # Extract the gene name from the allele name
+            gene = _find_gene_name(allele=allele)
 
             # Check if the best score is above the threshold
-            if best_score < 90:
+            if percent_id < 90:
                 continue
 
             # Update the stx profiles dictionary
             if gene not in stx_profiles:
-                stx_profiles[gene] = []
-
-            # Append the allele to the list
-            stx_profiles[gene].append(allele.lower())
+                stx_profiles.append(gene)
 
         # Update the sample dictionary
         sequence_dict['stx_profiles'] = sorted(stx_profiles)
+
+        # Log the stx profiles
+        for genes in sequence_dict['stx_profiles']:
+            logging.debug(
+                '%s STX profile %s',
+                sample, genes
+            )
+
+    return sample_dict
+
+
+def _find_best_hits(
+    *,  # Enforce keyword arguments
+    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
+) -> Dict[str, Dict[str, Union[List[str], str]]]:
+    """
+    Find the best hits for each sample
+
+    Args:
+        sample_dict: Dictionary containing the sample information
+
+    Returns:
+        dict: The updated sample dictionary
+    """
+
+    for sample, sequence_dict in sample_dict.items():
+
+        if sequence_dict['kma_sample_db'] is None:
+            continue
+
+        # Group alleles by gene
+        gene_to_alleles = defaultdict(list)
+        for allele, percent_id in sequence_dict['percent_identity'].items():
+            gene = _find_gene_name(allele=allele)
+            gene_to_alleles[gene].append(allele)
+
+        best_hits = {}
+
+        # Initialise the filtered alleles
+        sequence_dict['filtered_out_alleles'] = []
+
+        for gene, alleles in gene_to_alleles.items():
+
+            # If only one allele for this gene, consider it even if it has
+            # insertions
+            if len(alleles) == 1:
+                allele = alleles[0]
+                if sequence_dict['percent_identity'][allele] >= 90:
+                    best_hits[gene] = sequence_dict['percent_identity'][allele]
+                continue
+
+            # Otherwise, ignore alleles with insertions
+            filtered_alleles = [
+                a for a in alleles
+                if not sequence_dict['insertions'].get(a)
+            ]
+            # Collect alleles that are being filtered out
+            filtered_out_alleles = [
+                a for a in alleles
+                if sequence_dict['insertions'].get(a)
+            ]
+            # If all alleles have insertions, fall back to all alleles
+            if not filtered_alleles:
+                filtered_alleles = alleles
+                filtered_out_alleles = []
+
+            # Add the alleles to the appropriate dictionary
+            sequence_dict['filtered_alleles'] = filtered_alleles
+            sequence_dict['filtered_out_alleles'] = filtered_out_alleles
+
+            # Pick the allele with the highest percent identity
+            best = max(
+                filtered_alleles,
+                key=lambda a: sequence_dict['percent_identity'][a]
+            )
+            if sequence_dict['percent_identity'][best] >= 90:
+                best_hits[gene] = sequence_dict['percent_identity'][best]
+
+        sequence_dict['best_hits'] = best_hits
+
+        # Log the best hits
+        for gene, percent_id in sequence_dict['best_hits'].items():
+            logging.debug(
+                '%s Best hit %s: %s',
+                sample, gene, percent_id
+            )
+
+    return sample_dict
+
+
+def _find_duplicate_alleles(
+    *,  # Enforce keyword arguments
+    sample_dict: Dict[str, Dict[str, Union[List[str], str]]]
+) -> Dict[str, Dict[str, Union[List[str], str]]]:
+    """
+    Find duplicate alleles for each sample
+
+    Args:
+        sample_dict: Dictionary containing the sample information
+
+    Returns:
+        dict: The updated sample dictionary
+    """
+
+    for sample, sequence_dict in sample_dict.items():
+
+        # Ensure that the sample has a KMA database
+        if sequence_dict['kma_sample_db'] is None:
+            continue
+
+        # Create a set to store the best alleles
+        best_alleles = set()
+
+        # Create a set to store the duplicate alleles
+        duplicate_alleles = set()
+
+        # Extract the best hits
+        for allele, percent_id in sequence_dict['percent_identity'].items():
+
+            # Don't process filtered alleles
+            if allele in sequence_dict['filtered_out_alleles']:
+                continue
+
+            # Extract the gene name from the allele name
+            gene = _find_gene_name(allele=allele)
+
+            # Check if the best score is above the threshold
+            if percent_id < 90:
+                continue
+
+            # Extract the best hit
+            best_id = sequence_dict['best_hits'].get(gene)
+
+            # See if there are multiple alleles with the same best percent
+            # identity
+            if percent_id == best_id:
+
+                # Add the allele to the set of best alleles
+                if gene not in best_alleles:
+                    best_alleles.add(gene)
+                else:
+                    duplicate_alleles.add(gene)
+
+        # Update the sample dictionary
+        sequence_dict['duplicate_alleles'] = duplicate_alleles
+
+        # Log the duplicate alleles
+        for gene in sequence_dict['duplicate_alleles']:
+            logging.debug(
+                '%s Duplicate allele %s',
+                sample, gene
+            )
 
     return sample_dict
 
@@ -1329,27 +1546,35 @@ def _write_report(
                 print(f'{sample}\tND')
                 continue
 
-            # Extract the best hits
-            best_hits = sequence_dict['best_hits']
-
-            # Extract the stx profiles
-            stx_profiles = ';'.join(sequence_dict['stx_profiles'])
-
             # Iterate through the best hits
-            for gene, allele in best_hits.items():
-
-                # Extract the best score
-                best_score = sequence_dict['best_scores'][gene]
+            for allele, perc_id in sorted(
+                sequence_dict['percent_identity'].items()
+            ):
 
                 # Check if the best score is above the threshold
-                if best_score < 90:
+                if perc_id < 90:
+                    continue
+
+                # Don't process filtered alleles
+                if allele in sequence_dict['filtered_out_alleles']:
+                    continue
+
+                # Extract the gene name from the allele name
+                gene = _find_gene_name(allele=allele)
+
+                # Extract the best hit
+                best_id = sequence_dict['best_hits'].get(gene)
+
+                # Ensure that we're looking the best hit
+                if perc_id < best_id:
                     continue
 
                 # Extract the insertions
                 insertions = sequence_dict['insertions'][allele]
+                notes = str()
 
                 # Format the insertions
-                insertions = ';'.join(
+                notes = ';'.join(
                     [
                         f'Insertion:Position({pos}):MedianLength({length})'
                         for pos, length in insertions
@@ -1359,21 +1584,36 @@ def _write_report(
                 # Extract the consensus sequence QA
                 qa = sequence_dict['aa_sequence_qa'][allele]
 
-                # Check if the sequence is truncated or has an internal stop
-                # codon
+                # Check if the sequence is truncated or has an internal
+                # stop codon
                 if qa:
-                    if insertions:
-                        insertions += ';'
-                    insertions += qa
+                    if notes:
+                        notes += ';'
+                    notes += qa
+
+                # Extract the profile(s)
+                stx_profiles = sequence_dict['stx_profiles']
+
+                # Extract the set of duplicate alleles
+                duplicate_alleles = sequence_dict['duplicate_alleles']
+
+                # Create a warning if there are multiple profiles
+                if gene in duplicate_alleles:
+                    if notes:
+                        notes += ';'
+                    notes += f'Multiple profiles: for {gene}'
+
+                # Set the stx profiles to a string
+                stx_profiles = ','.join(stx_profiles)
 
                 # Write the report line
                 out_fh.write(
-                    f'{sample}\t{allele}\t{best_score}\t'
-                    f'{stx_profiles}\t{insertions}\n'
+                    f'{sample}\t{allele}\t{perc_id}\t'
+                    f'{stx_profiles}\t{notes}\n'
                 )
                 print(
-                    f'{sample}\t{allele}\t{best_score}\t'
-                    f'{stx_profiles}\t{insertions}')
+                    f'{sample}\t{allele}\t{perc_id}\t'
+                    f'{stx_profiles}\t{notes}')
 
 
 def run_command(
