@@ -769,11 +769,7 @@ def _map_reads_bwa(
 
             bwa_cmd = [
                 'bwa', 'mem',
-                '-B', '50',      # Mismatch penalty (default 4)
-                # '-O', '6,6',    # Gap open penalty (default 6,6)
-                # '-E', '1,1',    # Gap extension penalty (default 1,1)
-                # '-L', '8,8',    # Clipping penalty (default 5,5)
-                # '-T', '30',     # Minimum score to output (default 30)
+                '-B', '4',      # Mismatch penalty (default 4)
                 '-t', str(threads),
                 allele_db,
                 sequence_dict['baited_reads']
@@ -988,7 +984,7 @@ def _find_consensus_internal_insertions_and_sequence(
     bam_file: str,
     reference_file: str,
     min_coverage: float = 0.5,
-) -> tuple[list[tuple[int, int]], str]:
+) -> tuple[list[tuple[int, int]], str, float]:
     """
     Identifies consensus internal insertions (from CINS and CSCLIP) from a
     sorted BAM file and calculates the consensus sequence.
@@ -1001,11 +997,13 @@ def _find_consensus_internal_insertions_and_sequence(
         least 50% of reads covering that position.
 
     Returns:
+    Returns:
         A tuple containing:
         - A list of tuples, where each tuple contains the reference position
         of the insertion and the median length of the insertions at that
         position. **Positions are reported in 1-based coordinates.**
         - A string representing the consensus sequence.
+        - A float representing the percent identity.
     """
     # Open the BAM file
     sam_file = pysam.AlignmentFile(bam_file, "rb")
@@ -1020,7 +1018,6 @@ def _find_consensus_internal_insertions_and_sequence(
         ref_name=ref_name,
         ref_len=ref_len
     )
-
     # Store lengths of insertions at each position
     insertion_positions = defaultdict(list)
 
@@ -1185,7 +1182,7 @@ def _translate_allele_sequence(
     nt_sequence: str
 ) -> str:
     """
-    Translate the allele sequence to protein, replacing invalid codons with 'X'.
+    Translate the allele sequence to protein, replacing invalid codons with 'X'
 
     Args:
         nt_sequence: Nucleotide sequence of the allele.
@@ -1385,8 +1382,10 @@ def _find_best_hits(
 
         best_hits = {}
 
-        # Initialise the filtered alleles
+        # Initialise the filtered alleles and best hits
         sequence_dict['filtered_out_alleles'] = []
+        sequence_dict['filtered_alleles'] = []
+        sequence_dict['best_hits'] = {}
 
         for gene, alleles in gene_to_alleles.items():
 
@@ -1420,7 +1419,7 @@ def _find_best_hits(
             # Pick the allele with the highest percent identity
             best = max(
                 filtered_alleles,
-                key=lambda a: sequence_dict['percent_identity'][a]
+                key=lambda a, d=sequence_dict: d['percent_identity'][a]
             )
             if sequence_dict['percent_identity'][best] >= 90:
                 best_hits[gene] = sequence_dict['percent_identity'][best]
