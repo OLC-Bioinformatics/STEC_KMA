@@ -13,7 +13,10 @@ from unittest.mock import patch
 import pytest
 
 # Local imports
-from src.stec_kma import cli
+from src.stec_kma import (
+    cli,
+    restricted_float
+)
 
 
 def test_cli_returns_default_arguments():
@@ -59,7 +62,7 @@ def test_cli_returns_custom_arguments():
         assert args.sequence_path == "/path/to/sequences"
         assert args.database_path == "/path/to/database"
         assert args.report_path == "/path/to/reports"
-        assert args.min_coverage == "0.75"
+        assert args.min_coverage == 0.75
         assert args.identity == "95"
 
 
@@ -113,3 +116,36 @@ def test_cli_with_invalid_min_coverage():
         # Check the argparse validation
         with pytest.raises(SystemExit):
             cli()
+
+
+def test_restricted_float_valid():
+    """
+    Test that restricted_float() correctly converts valid string inputs
+    """
+    assert restricted_float("0.0") == 0.0
+    assert restricted_float("1.0") == 1.0
+    assert restricted_float("0.5") == 0.5
+
+
+def test_restricted_float_invalid_valueerror():
+    """
+    Test that restricted_float() raises ValueError for invalid string inputs
+    """
+    with pytest.raises(ValueError, match="not_a_float is not a valid float"):
+        restricted_float("not_a_float")
+
+
+def test_restricted_float_out_of_range_low():
+    """
+    Test that restricted_float() raises ValueError for out-of-range low values
+    """
+    with pytest.raises(ValueError, match="-0.1 is not between 0 and 1"):
+        restricted_float("-0.1")
+
+
+def test_restricted_float_out_of_range_high():
+    """
+    Test that restricted_float() raises ValueError for out-of-range high values
+    """
+    with pytest.raises(ValueError, match="1.1 is not between 0 and 1"):
+        restricted_float("1.1")
