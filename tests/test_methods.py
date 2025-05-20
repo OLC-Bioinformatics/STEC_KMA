@@ -31,7 +31,9 @@ from src.methods import (
     _extract_consensus_insertions_and_sequence,
     _extract_kma_mapped_reads,
     _extract_reads_by_name,
+    _find_best_hits,
     _find_consensus_internal_insertions_and_sequence,
+    _find_duplicate_alleles,
     _find_samples,
     _index_baited_sequences,
     _index_bam_file,
@@ -518,6 +520,10 @@ def test_parse_allele_reports(mock_open, setup_temp_dir):
                 setup_temp_dir,
                 "2222-FAKE-0000_baited_targets.res"
             ),
+            'percent_identity': {
+                'gene1_geneA_1': 99.5,
+                'gene2_geneB_2': 98.0
+            }
         }
     }
 
@@ -537,20 +543,19 @@ def test_parse_allele_reports(mock_open, setup_temp_dir):
     # Call the function
     updated_sample_dict = _parse_allele_reports(sample_dict=sample_dict)
 
-    # Assert that the best hits, scores, and hit files are updated correctly
-    assert "gene1" in updated_sample_dict["2222-FAKE-0000"]["best_hits"], \
-        "Expected gene1 to be in the best hits."
-    assert updated_sample_dict["2222-FAKE-0000"]["best_hits"]["gene1"] == \
-        "gene1_geneA_1", \
-        "Expected best hit for gene1 to be gene1_geneA_1."
-    assert updated_sample_dict["2222-FAKE-0000"]["best_scores"]["gene1"] == \
-        99.5, \
-        "Expected best score for gene1 to be 99.5."
+    # Assert that the best scores and hit files are updated correctly
+    assert "gene1_geneA_1" in \
+        updated_sample_dict["2222-FAKE-0000"]["best_scores"], \
+        "Expected gene1_geneA_1 to be in the best scores."
+    assert updated_sample_dict["2222-FAKE-0000"][
+        "best_scores"
+        ]["gene1_geneA_1"] == 99.5, \
+        "Expected best score for gene1_geneA_1 to be 99.5."
     assert updated_sample_dict[
         "2222-FAKE-0000"
-        ]["best_hit_files"]["gene1"] == \
+        ]["best_hit_files"]["gene1_geneA_1"] == \
         sample_dict["2222-FAKE-0000"]["kma_report_file"], \
-        "Expected best hit file for gene1 to match the report file."
+        "Expected best hit file for gene1_geneA_1 to match the report file."
 
 
 def test_parse_allele_reports_no_kma_db(setup_temp_dir):
@@ -616,19 +621,19 @@ def test_parse_allele_reports_value_error(mock_open, setup_temp_dir):
     updated_sample_dict = _parse_allele_reports(sample_dict=sample_dict)
 
     # Assert that the function handled the malformed line gracefully
-    assert "gene1" in updated_sample_dict["2222-FAKE-0000"]["best_hits"], \
-        "Expected gene1 to be in the best hits despite the malformed line."
-    assert updated_sample_dict["2222-FAKE-0000"]["best_hits"]["gene1"] == \
-        "gene1_geneA_1", \
-        "Expected best hit for gene1 to be gene1_geneA_1."
-    assert updated_sample_dict["2222-FAKE-0000"]["best_scores"]["gene1"] == \
-        99.5, \
-        "Expected best score for gene1 to be 99.5."
+    assert "gene1_geneA_1" in \
+        updated_sample_dict["2222-FAKE-0000"]["best_scores"], \
+        "Expected gene1_geneA_1 to be in the best scores despite the " \
+        "malformed line."
+    assert updated_sample_dict["2222-FAKE-0000"][
+        "best_scores"
+        ]["gene1_geneA_1"] == 99.5, \
+        "Expected best score for gene1_geneA_1 to be 99.5."
     assert updated_sample_dict[
         "2222-FAKE-0000"
-        ]["best_hit_files"]["gene1"] == \
+        ]["best_hit_files"]["gene1_geneA_1"] == \
         sample_dict["2222-FAKE-0000"]["kma_report_file"], \
-        "Expected best hit file for gene1 to match the report file."
+        "Expected best hit file for gene1_geneA_1 to match the report file."
 
 
 @patch("src.methods.SeqIO.parse")
@@ -653,7 +658,10 @@ def test_extract_allele_sequence(
                 setup_temp_dir,
                 "2222-FAKE-0000_baited_targets.fasta"
             ),
-            "best_hits": {"gene1": "geneA_1", "gene2": "geneB_2"},
+            "best_scores": {
+                "geneA_1": 99.5,
+                "geneB_2": 98.0
+            },
             "output_path": setup_temp_dir,
         }
     }
@@ -729,7 +737,7 @@ def test_write_allele_sequences(tmp_path):
     )
 
     # The output directory should be output_path/geneX
-    expected_dir = os.path.join(str(tmp_path), "geneX")
+    expected_dir = os.path.join(str(tmp_path), "geneX_alleleY")
     expected_file = os.path.join(expected_dir, "geneX_alleleY.fasta")
 
     # Check that the returned path is correct
@@ -769,7 +777,10 @@ def test_extract_kma_mapped_reads(mock_gzip_open, setup_temp_dir):
             "kma_report_file": os.path.join(
                 setup_temp_dir, "2222-FAKE-0000_baited_targets.res"
             ),
-            "best_hits": {"geneA": "geneA_1", "geneB": "geneB_2"},
+            "best_scores": {
+                "geneA_1": 99.5,
+                "geneB_2": 98.0
+            }
         }
     }
 
@@ -782,12 +793,10 @@ def test_extract_kma_mapped_reads(mock_gzip_open, setup_temp_dir):
 
     mapped_reads = updated["2222-FAKE-0000"]["mapped_reads"]
     # Should only contain alleles in best_hits
-    assert "geneA" in mapped_reads
-    assert "geneB" in mapped_reads
-    assert "geneA_1" in mapped_reads["geneA"]
-    assert "geneB_2" in mapped_reads["geneB"]
-    assert mapped_reads["geneA"]["geneA_1"] == ["readA", "readC"]
-    assert mapped_reads["geneB"]["geneB_2"] == ["readB"]
+    assert "geneA_1" in mapped_reads
+    assert "geneB_2" in mapped_reads
+    assert mapped_reads["geneA_1"] == ["readA", "readC"]
+    assert mapped_reads["geneB_2"] == ["readB"]
     # allele3 should not be present
     for gene_dict in mapped_reads.values():
         assert "allele3" not in gene_dict
@@ -822,13 +831,9 @@ def test_write_read_names_file(tmp_path):
             "kma_sample_db": "mock_db",
             "output_path": str(tmp_path),
             "mapped_reads": {
-                "geneA": {
-                    "geneA_1": ["read1", "read2"],
-                    "geneB_2": ["read3"]
-                },
-                "geneB": {
-                    "allele3": ["read4"]
-                }
+                "geneA_1": ["read1", "read2"],
+                "geneB_2": ["read3"],
+                "allele3": ["read4"]
             }
         }
     }
@@ -840,16 +845,15 @@ def test_write_read_names_file(tmp_path):
     gene_dirs = updated["sample1"]["gene_output_dir"]
 
     # Check files exist and contain correct read names
-    for gene, allele_dict in sample_dict["sample1"]["mapped_reads"].items():
-        gene_dir = os.path.join(tmp_path, gene)
-        assert gene_dirs[gene] == gene_dir
-        for allele, reads in allele_dict.items():
-            out_file = os.path.join(gene_dir, f"{gene}_{allele}.names")
-            assert mapped_files[gene][allele] == out_file
-            assert os.path.exists(out_file)
-            with open(out_file, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f.readlines()]
-                assert lines == reads
+    for allele, reads in sample_dict["sample1"]["mapped_reads"].items():
+        allele_dir = os.path.join(tmp_path, allele)
+        assert gene_dirs[allele] == allele_dir
+        out_file = os.path.join(allele_dir, f"{allele}.names")
+        assert mapped_files[allele] == out_file
+        assert os.path.exists(out_file)
+        with open(out_file, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f.readlines()]
+            assert lines == reads
 
 
 def test_write_read_names_file_no_kma_db(tmp_path):
@@ -889,16 +893,12 @@ def test_extract_reads_by_name(mock_exists, mock_run_command, tmp_path):
                 "geneB": {"geneB_2": ["read3"]}
             },
             "mapped_read_files": {
-                "geneA": {
-                    "geneA_1": str(tmp_path / "geneA" / "geneA_geneA_1.names")
-                },
-                "geneB": {
-                    "geneB_2": str(tmp_path / "geneB" / "geneB_geneB_2.names")
-                }
+                "geneA_1": str(tmp_path / "geneA" / "geneA_1.names"),
+                "geneB_2": str(tmp_path / "geneB" / "geneB_2.names")
             },
             "gene_output_dir": {
-                "geneA": str(tmp_path / "geneA"),
-                "geneB": str(tmp_path / "geneB")
+                "geneA_1": str(tmp_path / "geneA_1"),
+                "geneB_2": str(tmp_path / "geneB_2")
             }
         }
     }
@@ -910,15 +910,15 @@ def test_extract_reads_by_name(mock_exists, mock_run_command, tmp_path):
 
     # Check that extracted_reads is set correctly
     extracted = updated["sample1"]["extracted_reads"]
-    assert "geneA" in extracted and "geneA_1" in extracted["geneA"]
-    assert "geneB" in extracted and "geneB_2" in extracted["geneB"]
-    assert extracted["geneA"]["geneA_1"].endswith("geneA_geneA_1.fastq.gz")
-    assert extracted["geneB"]["geneB_2"].endswith("geneB_geneB_2.fastq.gz")
+    assert "geneA_1" in extracted
+    assert "geneB_2" in extracted
+    assert str(extracted["geneA_1"]).endswith("geneA_1.fastq.gz")
+    assert str(extracted["geneB_2"]).endswith("geneB_2.fastq.gz")
 
     # Check that run_command was called for each allele
     assert mock_run_command.call_count == 2
-    for call in mock_run_command.call_args_list:
-        assert "filterbyname.sh" in call.kwargs["command"]
+    for mocked_call in mock_run_command.call_args_list:
+        assert "filterbyname.sh" in mocked_call.kwargs["command"]
 
 
 @patch("src.methods.run_command")
@@ -973,12 +973,12 @@ def test_map_reads_bwa(
                 "geneB_2": str(tmp_path / "geneB" / "geneB_2.fasta"),
             },
             "gene_output_dir": {
-                "geneA": str(tmp_path / "geneA"),
-                "geneB": str(tmp_path / "geneB"),
+                "geneA_1": str(tmp_path / "geneA_1"),
+                "geneB_2": str(tmp_path / "geneB_2"),
             },
             "extracted_reads": {
-                "geneA": {"geneA_1": "foo"},
-                "geneB": {"geneB_2": "bar"},
+                "geneA_1": {"geneA_1": "foo"},
+                "geneB_2": {"geneB_2": "bar"},
             }
         }
     }
@@ -1002,13 +1002,14 @@ def test_map_reads_bwa(
 
     bwa_output = updated["sample1"]["bwa_output"]
     # Check that output BAM paths are set correctly
-    assert bwa_output["geneA_1"].endswith("geneA/geneA_1.bam")
-    assert bwa_output["geneB_2"].endswith("geneB/geneB_2.bam")
+    assert bwa_output["geneA_1"].endswith("geneA_1/geneA_1.bam")
+    assert bwa_output["geneB_2"].endswith("geneB_2/geneB_2.bam")
     # Check that _index_reference_allele and _index_bam_file were called
     assert mock_index_reference_allele.called
     assert mock_index_bam_file.called
     # Check that subprocess.Popen was called for BWA, samtools view, and sort
     assert mock_popen.call_count == 3 * 2  # 3 per allele, 2 alleles
+
 
 @patch("src.methods._index_reference_allele")
 @patch("src.methods._index_bam_file")
@@ -1069,10 +1070,10 @@ def test_map_reads_bwa_logs_stderr(
                 "geneA_1": str(tmp_path / "geneA" / "geneA_1.fasta"),
             },
             "gene_output_dir": {
-                "geneA": str(tmp_path / "geneA"),
+                "geneA_1": str(tmp_path / "geneA_1"),
             },
             "extracted_reads": {
-                "geneA": {"geneA_1": "foo"},
+                "geneA_1": {"geneA_1": "foo"},
             }
         }
     }
@@ -1119,13 +1120,13 @@ def test_map_reads_bwa_filenotfounderror(
             "kma_sample_db": "mock_db",
             "baited_reads": str(tmp_path / "sample1_baited.fastq.gz"),
             "allele_sequences": {
-                "geneA_1": str(tmp_path / "geneA" / "geneA_1.fasta"),
+                "geneA_1": str(tmp_path / "geneA_1" / "geneA_1.fasta"),
             },
             "gene_output_dir": {
-                "geneA": str(tmp_path / "geneA"),
+                "geneA_1": str(tmp_path / "geneA_1"),
             },
             "extracted_reads": {
-                "geneA": {"geneA_1": "foo"},
+                "geneA_1": {"geneA_1": "foo"},
             }
         }
     }
@@ -1173,13 +1174,13 @@ def test_map_reads_bwa_generic_exception(
             "kma_sample_db": "mock_db",
             "baited_reads": str(tmp_path / "sample1_baited.fastq.gz"),
             "allele_sequences": {
-                "geneA_1": str(tmp_path / "geneA" / "geneA_1.fasta"),
+                "geneA_1": str(tmp_path / "geneA_1" / "geneA_1.fasta"),
             },
             "gene_output_dir": {
-                "geneA": str(tmp_path / "geneA"),
+                "geneA_1": str(tmp_path / "geneA_1"),
             },
             "extracted_reads": {
-                "geneA": {"geneA_1": "foo"},
+                "geneA_1": {"geneA_1": "foo"},
             }
         }
     }
@@ -1340,7 +1341,7 @@ def test_extract_consensus_insertions_and_sequence(
     """
 
     # Mock return values
-    mock_find_consensus.return_value = ([(10, 2), (50, 1)], "ATGCATGC")
+    mock_find_consensus.return_value = ([(10, 2), (50, 1)], "ATGCATGC", 99.5)
     mock_translate.return_value = "MRT*"
     mock_detect_trunc.return_value = False
 
@@ -1350,7 +1351,11 @@ def test_extract_consensus_insertions_and_sequence(
             "bwa_output": {
                 "allele1": str(tmp_path / "geneA" / "allele1.bam"),
                 "allele2": str(tmp_path / "geneB" / "allele2.bam"),
-            }
+            },
+            "allele_sequences": {
+                "allele1": str(tmp_path / "geneA_1" / "allele1.fasta"),
+                "allele2": str(tmp_path / "geneA_1" / "allele2.fasta"),
+            },
         }
     }
 
@@ -1397,11 +1402,13 @@ def test_extract_consensus_insertions_and_sequence_no_kma_db(tmp_path):
     assert "aa_sequence_qa" not in updated["sample1"]
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_basic(
     mock_calc_depth,
     mock_alignmentfile,
+        mock_seqio_parse
 ):
     """
     Test _find_consensus_internal_insertions_and_sequence returns expected
@@ -1414,6 +1421,9 @@ def test_find_consensus_internal_insertions_and_sequence_basic(
     mock_samfile.references = ["ref1"]
 
     class FakeRead:
+        """
+        Create a fake read with a CIGAR string: 2M1I2M
+        """
         query_sequence = "A" * 5
         cigartuples = [
             (pysam.CMATCH, 2),   # 2M
@@ -1429,21 +1439,29 @@ def test_find_consensus_internal_insertions_and_sequence_basic(
 
     mock_calc_depth.return_value = {i: 2 for i in range(1, 31)}
 
-    insertions, consensus = _find_consensus_internal_insertions_and_sequence(
-        bam_file="dummy.bam",
-        min_coverage=0.5
-    )
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATG"), id="ref1")])
 
+    insertions, consensus, percent_identity = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="dummy.bam",
+            min_coverage=0.5,
+            reference_file="dummy_ref.fasta"
+        )
+
+    assert percent_identity == 33.33
     assert insertions == [(17, 1)]
     assert isinstance(consensus, str)
     assert len(consensus) == 30
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_no_insertions(
     mock_calc_depth,
     mock_alignmentfile,
+    mock_seqio_parse,
     tmpdir
 ):
     """
@@ -1461,6 +1479,9 @@ def test_find_consensus_internal_insertions_and_sequence_no_insertions(
 
     # Create a fake read with a CIGAR string: 3M (all match)
     class FakeRead:
+        """
+        Create a fake read with a CIGAR string: 3M
+        """
         query_sequence = "ATG"
         cigartuples = [
             (pysam.CMATCH, 3),   # 3M
@@ -1470,28 +1491,41 @@ def test_find_consensus_internal_insertions_and_sequence_no_insertions(
 
     mock_samfile.fetch.return_value = [FakeRead()]
 
-    insertions, consensus = _find_consensus_internal_insertions_and_sequence(
-        bam_file="dummy.bam",
-        min_coverage=0.5
-    )
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATG"), id="ref1")])
 
+    insertions, consensus, percent_identity = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="dummy.bam",
+            min_coverage=0.5,
+            reference_file="dummy_ref.fasta"
+        )
+    assert percent_identity == 100.0
     assert insertions == []
     assert isinstance(consensus, str)
     assert len(consensus) == 3
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("src.methods.pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_min_coverage(
     mock_calc_depth,
     mock_alignmentfile,
+    mock_seqio_parse,
     tmpdir
 ):
+    """
+    Test _find_consensus_internal_insertions_and_sequence with min_coverage
+    """
     mock_samfile = MagicMock()
     mock_samfile.lengths = [30]
     mock_samfile.references = ["ref1"]
 
     class FakeRead1:
+        """
+        Create a fake read with a CIGAR string: 1M1I2M
+        """
         query_sequence = "ATGC"
         cigartuples = [
             (pysam.CMATCH, 1),
@@ -1502,6 +1536,9 @@ def test_find_consensus_internal_insertions_and_sequence_min_coverage(
         query_name = "read1"
 
     class FakeRead2:
+        """
+        Create a fake read with a CIGAR string: 4M
+        """
         query_sequence = "ATGC"
         cigartuples = [
             (pysam.CMATCH, 4),
@@ -1513,24 +1550,35 @@ def test_find_consensus_internal_insertions_and_sequence_min_coverage(
     mock_alignmentfile.return_value = mock_samfile
     mock_calc_depth.return_value = {i: 2 for i in range(0, 30)}
 
-    insertions, _ = _find_consensus_internal_insertions_and_sequence(
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATG"), id="ref1")])
+
+    # Mock SeqIO.parse to return a fresh iterator each time
+    mock_seqio_parse.side_effect = \
+        lambda *args, **kwargs: iter([SeqRecord(Seq("ATG"), id="ref1")])
+
+    insertions, _, __ = _find_consensus_internal_insertions_and_sequence(
         bam_file="dummy.bam",
-        min_coverage=0.5
+        min_coverage=0.5,
+        reference_file="dummy_ref.fasta"
     )
     assert insertions == [(16, 1)]
 
-    insertions, _ = _find_consensus_internal_insertions_and_sequence(
+    insertions, _, __ = _find_consensus_internal_insertions_and_sequence(
         bam_file="dummy.bam",
-        min_coverage=0.6
+        min_coverage=0.6,
+        reference_file="dummy_ref.fasta"
     )
     assert insertions == []
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_deletion(
     mock_calc_depth,
     mock_alignmentfile,
+    mock_seqio_parse,
 ):
     """
     Test _find_consensus_internal_insertions_and_sequence handles deletions
@@ -1546,8 +1594,14 @@ def test_find_consensus_internal_insertions_and_sequence_deletion(
     # Mock depth per position
     mock_calc_depth.return_value = {i: 2 for i in range(10)}
 
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATGC"), id="ref1")])
+
     # Create a fake read with a CIGAR string: 2M 1D 2M (match, deletion, match)
     class FakeRead:
+        """
+        Create a fake read with a CIGAR string: 2M 1D 2M
+        """
         query_sequence = "ATGC"
         cigartuples = [
             (pysam.CMATCH, 2),   # 2M
@@ -1559,22 +1613,27 @@ def test_find_consensus_internal_insertions_and_sequence_deletion(
 
     mock_samfile.fetch.return_value = [FakeRead()]
 
-    insertions, consensus = _find_consensus_internal_insertions_and_sequence(
-        bam_file="dummy.bam",
-        min_coverage=0.5
-    )
+    insertions, consensus, percent_identity = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="dummy.bam",
+            min_coverage=0.5,
+            reference_file="dummy_ref.fasta"
+        )
 
     # No insertions expected, and consensus should reflect the deletion
     assert insertions == []
+    assert percent_identity == 100.0
     assert isinstance(consensus, str)
     assert len(consensus) == 10  # Reference length
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_hard_clip_and_pad(
     mock_calc_depth,
     mock_alignmentfile,
+    mock_seqio_parse,
 ):
     """
     Test _find_consensus_internal_insertions_and_sequence handles hard clips
@@ -1590,8 +1649,12 @@ def test_find_consensus_internal_insertions_and_sequence_hard_clip_and_pad(
     # Mock depth per position
     mock_calc_depth.return_value = {i: 2 for i in range(10)}
 
-    # Create a fake read with a CIGAR string: 2M 1H 1N 1P 2M (match, hard clip, skip, pad, match)
+    # Create a fake read with a CIGAR string: 2M 1H 1N 1P 2M (match, hard
+    # clip, skip, pad, match)
     class FakeRead:
+        """
+        Create a fake read with a CIGAR string: 2M 1H 1N 1P 2M
+        """
         query_sequence = "ATGC"
         cigartuples = [
             (pysam.CMATCH, 2),       # 2M
@@ -1605,22 +1668,30 @@ def test_find_consensus_internal_insertions_and_sequence_hard_clip_and_pad(
 
     mock_samfile.fetch.return_value = [FakeRead()]
 
-    insertions, consensus = _find_consensus_internal_insertions_and_sequence(
-        bam_file="dummy.bam",
-        min_coverage=0.5
-    )
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATGC"), id="ref1")])
+
+    insertions, consensus, percent_identity = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="dummy.bam",
+            min_coverage=0.5,
+            reference_file="dummy_ref.fasta"
+        )
 
     # No insertions expected, and consensus should reflect the reference length
     assert insertions == []
+    assert percent_identity == 100.0
     assert isinstance(consensus, str)
     assert len(consensus) == 10  # Reference length
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_unexpected_cigar(
     mock_calc_depth,
     mock_alignmentfile,
+    mock_seqio_parse,
 ):
     """
     Test _find_consensus_internal_insertions_and_sequence raises ValueError
@@ -1638,6 +1709,10 @@ def test_find_consensus_internal_insertions_and_sequence_unexpected_cigar(
 
     # Create a fake read with an unexpected CIGAR operation
     class FakeRead:
+        """
+        Create a fake read with an unexpected CIGAR operation: 99
+        (unexpected operation)
+        """
         query_sequence = "ATGC"
         cigartuples = [
             (99, 1),  # Unexpected operation
@@ -1647,18 +1722,24 @@ def test_find_consensus_internal_insertions_and_sequence_unexpected_cigar(
 
     mock_samfile.fetch.return_value = [FakeRead()]
 
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATGC"), id="ref1")])
+
     with pytest.raises(ValueError, match="Unexpected CIGAR operation: 99"):
         _find_consensus_internal_insertions_and_sequence(
             bam_file="dummy.bam",
-            min_coverage=0.5
+            min_coverage=0.5,
+            reference_file="dummy_ref.fasta"
         )
 
 
+@patch("src.methods.SeqIO.parse")
 @patch("pysam.AlignmentFile")
 @patch("src.methods._calculate_depth_per_position")
 def test_find_consensus_internal_insertions_and_sequence_no_reads(
     mock_calc_depth,
     mock_alignmentfile,
+    mock_seqio_parse,
 ):
     """
     Test _find_consensus_internal_insertions_and_sequence handles positions
@@ -1675,8 +1756,14 @@ def test_find_consensus_internal_insertions_and_sequence_no_reads(
     mock_calc_depth.return_value = {i: 2 for i in range(10)}
     mock_calc_depth.return_value[5] = 0  # No reads at position 5
 
+    # Mock SeqIO.parse to return a fake record
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ATGC"), id="ref1")])
+
     # Create a fake read with a CIGAR string: 10M (all match)
     class FakeRead:
+        """
+        Create a fake read with a CIGAR string: 10M
+        """
         query_sequence = "ATGCATGCAT"
         cigartuples = [
             (pysam.CMATCH, 10),  # 10M
@@ -1686,13 +1773,16 @@ def test_find_consensus_internal_insertions_and_sequence_no_reads(
 
     mock_samfile.fetch.return_value = [FakeRead()]
 
-    insertions, consensus = _find_consensus_internal_insertions_and_sequence(
-        bam_file="dummy.bam",
-        min_coverage=0.5
-    )
+    insertions, consensus, percent_identity = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="dummy.bam",
+            min_coverage=0.5,
+            reference_file="dummy_ref.fasta"
+        )
 
     # No insertions expected, and consensus should reflect the reference length
     assert insertions == []
+    assert percent_identity == 100.0
     assert isinstance(consensus, str)
     assert len(consensus) == 10  # Reference length
 
@@ -1882,6 +1972,55 @@ def test_translate_allele_sequence_with_non_standard_bases():
         f"Expected {expected_protein}, but got {protein_sequence}"
 
 
+def test_translate_allele_sequence_invalid_codon_results_in_x():
+    """
+    Test that _translate_allele_sequence returns 'X' for codons not in the
+    codon table or stop codons.
+
+    Specifically, this covers the 'else: protein.append("X")' branch, ensuring
+    that an invalid codon (not in the codon table and not a stop codon) is
+    translated as 'X'.
+    """
+    # "ZZZ" is not a valid codon and not a stop codon
+    result = _translate_allele_sequence(nt_sequence="ZZZ")
+    assert result == "X"
+
+
+def test_translate_allele_sequence_valid_and_stop_codons():
+    """
+    Test that _translate_allele_sequence returns correct amino acids for valid
+    and stop codons.
+
+    This covers:
+    - A valid codon (e.g., "ATG" -> "M")
+    - A stop codon (e.g., "TAA" -> "*")
+    """
+    assert _translate_allele_sequence(nt_sequence="ATG") == "M"
+    assert _translate_allele_sequence(nt_sequence="TAA") == "*"
+
+
+def test_translate_allele_sequence_with_n_and_gap():
+    """
+    Test that _translate_allele_sequence returns 'X' for codons containing 'N'
+    or '-'.
+
+    This covers the branch where ambiguous bases or gaps are present in the
+    codon.
+    """
+    assert _translate_allele_sequence(nt_sequence="ANN") == "X"
+    assert _translate_allele_sequence(nt_sequence="A--") == "X"
+
+
+def test_translate_allele_sequence_short_codon():
+    """
+    Test that _translate_allele_sequence pads short codons and returns 'X'.
+
+    This covers the case where the input sequence is less than 3 bases.
+    """
+    assert _translate_allele_sequence(nt_sequence="A") == "X"
+    assert _translate_allele_sequence(nt_sequence="AT") == "X"
+
+
 def test_detect_truncated_sequences_no_truncation():
     """
     Test _detect_truncated_sequences with a valid protein sequence of
@@ -1972,6 +2111,9 @@ def test_write_novel_allele_sequences_basic(
             "aa_sequence": {
                 "geneA_1": "MRT", "geneB_2": "KLM", "geneC_3": "XYZ"
             },
+            'percent_identity': {
+                "geneA_1": 95.0, "geneB_2": 100.0, "geneC_3": 89.0
+            },
         }
     }
 
@@ -2037,7 +2179,8 @@ def test_write_novel_allele_sequences_no_kma_db(
 @patch("src.methods._calculate_stx_profile")
 def test_calculate_stx_profile_basic(mock_calculate_stx_profile):
     """
-    Test _calculate_stx_profile calculates stx profiles correctly for valid data.
+    Test _calculate_stx_profile calculates stx profiles correctly for valid
+    data.
     """
 
     # Prepare a mock sample_dict
@@ -2046,11 +2189,13 @@ def test_calculate_stx_profile_basic(mock_calculate_stx_profile):
             "kma_sample_db": "mock_db",
             "best_hits": {"geneA": "geneA_1", "geneB": "geneB_2"},
             "best_scores": {"geneA": 95.0, "geneB": 100.0},
+            "percent_identity": {"geneA": 95.0, "geneB": 100.0},
         },
         "sample2": {
             "kma_sample_db": "mock_db",
             "best_hits": {"geneC": "geneC_1"},
             "best_scores": {"geneC": 92.0},
+            "percent_identity": {"geneC": 92.0},
         },
     }
 
@@ -2058,7 +2203,8 @@ def test_calculate_stx_profile_basic(mock_calculate_stx_profile):
     updated_sample_dict = _calculate_stx_profile(sample_dict=sample_dict)
 
     # Verify the stx profiles
-    assert updated_sample_dict["sample1"]["stx_profiles"] == ["geneA", "geneB"], \
+    assert updated_sample_dict["sample1"]["stx_profiles"] == \
+        ["geneA", "geneB"], \
         "Expected stx profiles for sample1 to include geneA and geneB."
     assert updated_sample_dict["sample2"]["stx_profiles"] == ["geneC"], \
         "Expected stx profiles for sample2 to include geneC."
@@ -2097,6 +2243,7 @@ def test_calculate_stx_profile_scores_below_threshold():
             "kma_sample_db": "mock_db",
             "best_hits": {"geneA": "geneA_1", "geneB": "geneB_2"},
             "best_scores": {"geneA": 85.0, "geneB": 89.0},  # Below threshold
+            "percent_identity": {"geneA": 85.0, "geneB": 89.0},
         }
     }
 
@@ -2120,6 +2267,7 @@ def test_calculate_stx_profile_mixed_scores():
             "kma_sample_db": "mock_db",
             "best_hits": {"geneA": "geneA_1", "geneB": "geneB_2"},
             "best_scores": {"geneA": 95.0, "geneB": 85.0},
+            "percent_identity": {"geneA": 95.0, "geneB": 85.0},
         }
     }
 
@@ -2142,6 +2290,7 @@ def test_calculate_stx_profile_empty_best_hits():
             "kma_sample_db": "mock_db",
             "best_hits": {},  # No best hits
             "best_scores": {},
+            "percent_identity": {},
         }
     }
 
@@ -2164,11 +2313,13 @@ def test_calculate_stx_profile_multiple_samples():
             "kma_sample_db": "mock_db",
             "best_hits": {"geneA": "geneA_1"},
             "best_scores": {"geneA": 95.0},
+            "percent_identity": {"geneA": 95.0},
         },
         "sample2": {
             "kma_sample_db": "mock_db",
             "best_hits": {"geneB": "geneB_1"},
             "best_scores": {"geneB": 85.0},  # Below threshold
+            "percent_identity": {"geneB": 85.0},
         },
     }
 
@@ -2193,6 +2344,7 @@ def test_calculate_stx_profile_case_insensitivity():
             "kma_sample_db": "mock_db",
             "best_hits": {"GeneA": "geneA_1", "GENEB": "geneB_2"},
             "best_scores": {"GeneA": 95.0, "GENEB": 100.0},
+            "percent_identity": {"GeneA": 95.0, "GENEB": 100.0},
         }
     }
 
@@ -2215,9 +2367,12 @@ def test_write_report_basic(mock_open, tmp_path):
     sample_dict = {
         "sample1": {
             "kma_sample_db": "mock_db",
-            "best_hits": {"geneA": "geneA_1", "geneB": "geneB_2"},
-            "best_scores": {"geneA": 95.0, "geneB": 100.0},
+            "best_hits": {"geneA": 95.0, "geneB": 100.0},
+            "best_scores": {"geneA_1": 95.0, "geneB_2": 100.0},
+            "percent_identity": {"geneA_1": 95.0, "geneB_2": 100.0},
+            "filtered_out_alleles": ["geneC"],
             "stx_profiles": ["stx1", "stx2"],
+            'duplicate_alleles': ["geneA_1"],
             "insertions": {
                 "geneA_1": [(10, 2), (50, 1)],
                 "geneB_2": []
@@ -2245,11 +2400,11 @@ def test_write_report_basic(mock_open, tmp_path):
     handle.write.assert_has_calls([
         call("Sample\tAllele\tPercentIdentity\tExpectedProfile\tNotes\n"),
         call(
-            "sample1\tgeneA_1\t95.0\tstx1;stx2\t"
+            "sample1\tgeneA_1\t95.0\tstx1,stx2\t"
             "Insertion:Position(10):MedianLength(2);Insertion:Position(50):"
             "MedianLength(1);Truncated: 200\n"
         ),
-        call("sample1\tgeneB_2\t100.0\tstx1;stx2\t\n"),
+        call("sample1\tgeneB_2\t100.0\tstx1,stx2\t\n"),
     ])
 
 
@@ -2296,14 +2451,16 @@ def test_write_report_no_hits_above_threshold(mock_open, tmp_path):
     sample_dict = {
         "sample1": {
             "kma_sample_db": "mock_db",
-            "best_hits": {"geneA": "allele1", "geneB": "allele2"},
-            "best_scores": {"geneA": 85.0, "geneB": 89.0},  # Below threshold
+            "best_hits": {"geneA": 85.0, "geneB": 89.0},
+            "best_scores": {"geneA_1": 85.0, "geneB_2": 89.0},
+            "percent_identity": {"geneA_1": 85.0, "geneB_2": 89.0},
+            "filtered_out_alleles": ["geneC"],
             "stx_profiles": ["stx1", "stx2"],
+            'duplicate_alleles': ["geneA_1"],
             "insertions": {},
             "aa_sequence_qa": {}
         }
     }
-
     # Call the function
     _write_report(
         report_path=str(tmp_path),
@@ -2334,14 +2491,17 @@ def test_write_report_with_insertions_and_qa(mock_open, tmp_path):
     sample_dict = {
         "sample1": {
             "kma_sample_db": "mock_db",
-            "best_hits": {"geneA": "allele1"},
-            "best_scores": {"geneA": 95.0},
+            "best_hits": {"geneA": 95.0},
+            "best_scores": {"geneA_1": 95.0},
+            "percent_identity": {"geneA_1": 95.0},
+            "filtered_out_alleles": ["geneC"],
             "stx_profiles": ["stx1"],
+            'duplicate_alleles': ["geneA_1"],
             "insertions": {
-                "allele1": [(10, 2), (20, 3)]
+                "geneA_1": [(10, 2), (20, 3)],
             },
             "aa_sequence_qa": {
-                "allele1": "Internal stop codon at position: 50"
+                "geneA_1": "Internal stop codon at position: 50"
             }
         }
     }
@@ -2363,7 +2523,7 @@ def test_write_report_with_insertions_and_qa(mock_open, tmp_path):
     handle.write.assert_has_calls([
         call("Sample\tAllele\tPercentIdentity\tExpectedProfile\tNotes\n"),
         call(
-            "sample1\tallele1\t95.0\tstx1\t"
+            "sample1\tgeneA_1\t95.0\tstx1\t"
             "Insertion:Position(10):MedianLength(2);Insertion:Position(20):"
             "MedianLength(3);Internal stop codon at position: 50\n"
         ),
@@ -2423,3 +2583,339 @@ def test_version():
     version_pattern = r"^\d{4}\.\d{2}\.\d{2}\.\d+$"
     assert re.match(version_pattern, __version__), \
         f"The version '{__version__}' does not match the expected format."
+
+
+@patch("src.methods.SeqIO.parse")
+@patch("src.methods.pairwise2.align.globalxx")
+@patch("src.methods._calculate_depth_per_position")
+@patch("src.methods.pysam.AlignmentFile")
+def test_find_consensus_internal_insertions_and_sequence_low_coverage(
+    mock_alignmentfile, mock_depth, mock_align, mock_seqio_parse
+):
+    """
+    Test _find_consensus_internal_insertions_and_sequence with low coverage
+    """
+    # Insertions, but coverage below threshold
+    mock_read = MagicMock()
+    mock_read.query_sequence = "ACGT"
+    mock_read.cigartuples = [(0, 2), (1, 1), (0, 1)]
+    mock_read.reference_start = 0
+    mock_alignmentfile.return_value.fetch.return_value = [mock_read]
+    mock_alignmentfile.return_value.lengths = [4]
+    mock_alignmentfile.return_value.references = ["ref"]
+    # Only 1 read at pos 2, but total_reads_at_position[2]=10
+    mock_depth.return_value = {0: 2, 1: 2, 2: 10, 3: 1}
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ACGT"), id="ref1")])
+    mock_align.return_value = [("ACGT", "ACGT", 4, 0, 4)]
+    insertions, consensus, pid = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="bam", reference_file="fasta", min_coverage=0.5
+        )
+    assert insertions == []  # Not enough coverage
+    assert consensus == "ACT-"
+    assert pid == 100.0
+
+
+@patch("src.methods.SeqIO.parse")
+@patch("src.methods.pairwise2.align.globalxx")
+@patch("src.methods._calculate_depth_per_position")
+@patch("src.methods.pysam.AlignmentFile")
+def test_find_consensus_internal_insertions_and_sequence_no_base_counts(
+    mock_alignmentfile, mock_depth, mock_align, mock_seqio_parse
+):
+    """
+    Test _find_consensus_internal_insertions_and_sequence with no base
+    counts.
+    """
+    # No base_counts at all, consensus should be all gaps
+    mock_read = MagicMock()
+    mock_read.query_sequence = "ACGT"
+    mock_read.cigartuples = []  # No operations
+    mock_read.reference_start = 0
+    mock_alignmentfile.return_value.fetch.return_value = [mock_read]
+    mock_alignmentfile.return_value.lengths = [4]
+    mock_alignmentfile.return_value.references = ["ref"]
+    mock_depth.return_value = {0: 1, 1: 1, 2: 1, 3: 1}
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ACGT"), id="ref1")])
+    mock_align.return_value = [("----", "ACGT", 0, 0, 4)]
+    insertions, consensus, pid = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="bam", reference_file="fasta", min_coverage=0.5
+        )
+    assert consensus == "----"
+    assert insertions == []
+    assert pid == 0.0
+
+
+@patch("src.methods.SeqIO.parse")
+@patch("src.methods.pairwise2.align.globalxx")
+@patch("src.methods._calculate_depth_per_position")
+@patch("src.methods.pysam.AlignmentFile")
+def test_find_consensus_internal_insertions_and_sequence_empty_reads(
+    mock_alignmentfile, mock_depth, mock_align, mock_seqio_parse
+):
+    """
+    Test _find_consensus_internal_insertions_and_sequence with empty reads
+    """
+    # No reads at all
+    mock_alignmentfile.return_value.fetch.return_value = []
+    mock_alignmentfile.return_value.lengths = [4]
+    mock_alignmentfile.return_value.references = ["ref"]
+    mock_depth.return_value = {0: 1, 1: 1, 2: 1, 3: 1}
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ACGT"), id="ref1")])
+    mock_align.return_value = [("----", "ACGT", 0, 0, 4)]
+    insertions, consensus, pid = \
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="bam", reference_file="fasta", min_coverage=0.5
+        )
+    assert consensus == "----"
+    assert insertions == []
+    assert pid == 0.0
+
+
+@patch("src.methods.SeqIO.parse")
+@patch("src.methods.pairwise2.align.globalxx")
+@patch("src.methods._calculate_depth_per_position")
+@patch("src.methods.pysam.AlignmentFile")
+def test_find_consensus_internal_insertions_and_sequence_no_alignments(
+    mock_alignmentfile, mock_depth, mock_align, mock_seqio_parse
+):
+    """
+    Test _find_consensus_internal_insertions_and_sequence with no
+    alignments.
+    """
+    # pairwise2 returns no alignments
+    mock_read = MagicMock()
+    mock_read.query_sequence = "ACGT"
+    mock_read.cigartuples = [(0, 4)]
+    mock_read.reference_start = 0
+    mock_alignmentfile.return_value.fetch.return_value = [mock_read]
+    mock_alignmentfile.return_value.lengths = [4]
+    mock_alignmentfile.return_value.references = ["ref"]
+    mock_depth.return_value = {0: 1, 1: 1, 2: 1, 3: 1}
+    mock_seqio_parse.return_value = iter([SeqRecord(Seq("ACGT"), id="ref1")])
+    mock_align.return_value = []
+    # Should raise IndexError when accessing alignments[0]
+    with pytest.raises(IndexError):
+        _find_consensus_internal_insertions_and_sequence(
+            bam_file="bam", reference_file="fasta", min_coverage=0.5
+        )
+
+
+@patch("src.methods._find_consensus_internal_insertions_and_sequence")
+def test_find_best_hits_multiple_alleles(mock_find_consensus):
+    """
+    Test _find_best_hits with multiple alleles
+    """
+
+    # Simulate a sample_dict with two alleles for the same gene
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {
+                "geneA_1": 95.0,
+                "geneA_2": 98.0,
+                "geneB_1": 99.0
+            },
+            "insertions": {
+                "geneA_1": [],
+                "geneA_2": [],
+                "geneB_1": []
+            }
+        }
+    }
+
+    # Call the function
+    updated = _find_best_hits(sample_dict=sample_dict)
+
+    # Both alleles for geneA should be considered, geneB only has one
+    assert "geneA" in updated["sample1"]["best_hits"]
+    assert "geneB" in updated["sample1"]["best_hits"]
+    assert updated["sample1"]["best_hits"]["geneA"] == 98.0
+    assert updated["sample1"]["best_hits"]["geneB"] == 99.0
+    assert updated["sample1"]["filtered_alleles"] == ["geneA_1", "geneA_2"]
+
+
+def test_find_best_hits_all_alleles_have_insertions():
+    """
+    Test _find_best_hits when all alleles have insertions.
+    """
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {
+                "geneA_1": 95.0,
+                "geneA_2": 98.0,
+            },
+            "insertions": {
+                "geneA_1": [("dummy", 1)],
+                "geneA_2": [("dummy", 2)],
+            }
+        }
+    }
+
+    updated = _find_best_hits(sample_dict=sample_dict)
+
+    # Both alleles should be considered since all have insertions
+    assert set(updated["sample1"]["filtered_alleles"]) == {
+        "geneA_1", "geneA_2"
+    }
+    assert updated["sample1"]["filtered_out_alleles"] == []
+    assert updated["sample1"]["best_hits"]["geneA"] == 98.0
+
+
+def test_find_duplicate_alleles_skips_filtered_out():
+    """
+    Test _find_duplicate_alleles when some alleles are filtered out.
+    """
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {
+                "geneA_1": 95.0,
+                "geneA_2": 95.0,
+                "geneA_3": 95.0,
+            },
+            "filtered_out_alleles": ["geneA_2"],
+            "best_hits": {"geneA": 95.0},
+        }
+    }
+
+    updated = _find_duplicate_alleles(sample_dict=sample_dict)
+
+    # geneA_2 should be skipped, so only geneA_1 and geneA_3 are considered
+    # Only one geneA should be in best_alleles, so no duplicates
+    assert updated["sample1"]["duplicate_alleles"] == {'geneA'}
+
+
+def test_find_duplicate_alleles_below_threshold():
+    """
+    Tests _find_duplicate_alleles when all alleles are below the threshold.
+    """
+
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {
+                "geneA_1": 85.0,  # Below threshold
+                "geneA_2": 95.0,  # Above threshold
+            },
+            "filtered_out_alleles": [],
+            "best_hits": {"geneA": 95.0},
+        }
+    }
+
+    updated = _find_duplicate_alleles(sample_dict=sample_dict)
+
+    # geneA_1 should be skipped, only geneA_2 is considered, so no duplicates
+    assert updated["sample1"]["duplicate_alleles"] == set()
+
+
+def test_write_report_skips_filtered_out_alleles(tmp_path):
+    """
+    Test that _write_report skips filtered out alleles.
+    """
+
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {"geneA_1": 95.0, "geneA_2": 95.0},
+            "filtered_out_alleles": ["geneA_2"],
+            "best_hits": {"geneA": 95.0},
+            "insertions": {"geneA_1": [], "geneA_2": []},
+            "aa_sequence_qa": {"geneA_1": "", "geneA_2": ""},
+            "stx_profiles": ["geneA"],
+            "duplicate_alleles": set(),
+        }
+    }
+    report_path = tmp_path
+    _write_report(report_path=report_path, sample_dict=sample_dict)
+    report_file = os.path.join(report_path, "stec_kma_report.tsv")
+    with open(report_file, encoding='utf-8') as f:
+        lines = f.readlines()
+    # Only geneA_1 should be present, geneA_2 is filtered out
+    assert any("geneA_1" in line for line in lines)
+    assert not any("geneA_2" in line for line in lines)
+
+
+def test_write_report_only_best_hit(tmp_path):
+    """
+    Test that _write_report only includes the best hit for each gene.
+    """
+
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {"geneA_1": 90.0, "geneA_2": 95.0},
+            "filtered_out_alleles": [],
+            "best_hits": {"geneA": 95.0},
+            "insertions": {"geneA_1": [], "geneA_2": []},
+            "aa_sequence_qa": {"geneA_1": "", "geneA_2": ""},
+            "stx_profiles": ["geneA"],
+            "duplicate_alleles": set(),
+        }
+    }
+    report_path = tmp_path
+    _write_report(report_path=report_path, sample_dict=sample_dict)
+    report_file = os.path.join(report_path, "stec_kma_report.tsv")
+    with open(report_file, encoding='utf-8') as f:
+        lines = f.readlines()
+    # Only geneA_2 should be present, geneA_1 is not the best hit
+    assert any("geneA_2" in line for line in lines)
+    assert not any("geneA_1" in line for line in lines)
+
+
+def test_write_report_multiple_profiles_warning(tmp_path):
+    """
+    Test that _write_report includes a warning for multiple profiles.
+    """
+
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {"geneA_1": 95.0},
+            "filtered_out_alleles": [],
+            "best_hits": {"geneA": 95.0},
+            "insertions": {"geneA_1": []},
+            "aa_sequence_qa": {"geneA_1": ""},
+            "stx_profiles": ["geneA"],
+            "duplicate_alleles": {"geneA"},
+        }
+    }
+    report_path = tmp_path
+    _write_report(report_path=report_path, sample_dict=sample_dict)
+    report_file = os.path.join(report_path, "stec_kma_report.tsv")
+    with open(report_file, encoding='utf-8') as f:
+        lines = f.readlines()
+    # The warning should appear in the notes column
+    assert any("Multiple profiles: for geneA" in line for line in lines)
+
+
+def test_write_report_multiple_profiles_with_existing_notes(tmp_path):
+    """
+    Test that _write_report includes a warning for multiple profiles
+    """
+
+    sample_dict = {
+        "sample1": {
+            "kma_sample_db": "mock_db",
+            "percent_identity": {"geneA_1": 95.0},
+            "filtered_out_alleles": [],
+            "best_hits": {"geneA": 95.0},
+            "insertions": {"geneA_1": [(5, 2)]},  # This will create a note
+            "aa_sequence_qa": {"geneA_1": "Truncated: 100"},
+            "stx_profiles": ["geneA"],
+            "duplicate_alleles": {"geneA"},
+        }
+    }
+    report_path = tmp_path
+    _write_report(report_path=report_path, sample_dict=sample_dict)
+    report_file = os.path.join(report_path, "stec_kma_report.tsv")
+    with open(report_file, encoding='utf-8') as f:
+        lines = f.readlines()
+    # The notes column should contain both the insertion, the QA, and the
+    # multiple profiles warning, separated by semicolons
+    assert any(
+        "Insertion:Position(5):MedianLength(2);Truncated: 100;Multiple "
+        "profiles: for geneA" in line for line in lines
+    )
